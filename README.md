@@ -235,7 +235,7 @@ Connect to `ws://localhost:12000/ws` to receive `PAGE_DISCOVERED`, `PAGE_DOWNLOA
 
 - Multi-stage Docker builds (Node UI build → Python runtime)
 - Docker Compose v2
-- Single SQLite database + Docker named volume for persistent data
+- SQLite database + host-bind data directory (configurable via `DATA_PATH`, defaults to `./data`)
 
 ---
 
@@ -249,9 +249,10 @@ All variables are read from the `.env` file at the project root (or the host env
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
 | `DOCKER_PORT`              | Host port published by `api-gateway`; UI + REST + WS are all served from this port.                                                                                                                                                                    | `12000`                          |
 | `DOCKER_NETWORK`           | Name of the Docker bridge network shared by all services.                                                                                                                                                                                              | `extractor_network`              |
+| `DATA_PATH`                | Host path bind-mounted to `/data` inside every service. Holds scraped pages, downloaded assets, and the SQLite database. Created on first run if it does not exist. Use an absolute path for clarity in production.                                    | `./data`                         |
 | `REDIS_URL`                | Redis connection URL used by every service for pub/sub and list-based sync.                                                                                                                                                                            | `redis://redis:6379`             |
 | `DATABASE_PATH`            | SQLite database file path inside the api-gateway container.                                                                                                                                                                                            | `/data/extractor.db`             |
-| `DATA_DIR`                 | Root directory inside each container for scraped pages, downloaded assets, and the database. Backed by the `data` Docker volume.                                                                                                                       | `/data`                          |
+| `DATA_DIR`                 | Root directory inside each container for scraped pages, downloaded assets, and the database. Mapped to the host via `DATA_PATH`.                                                                                                                       | `/data`                          |
 | `SCRAPER_SERVICE_URL`      | Internal URL the api-gateway uses to reach the scraper service.                                                                                                                                                                                        | `http://scraper-service:8001`    |
 | `EXTRACTION_SERVICE_URL`   | Internal URL the api-gateway uses to reach the extraction service.                                                                                                                                                                                     | `http://extraction-service:8002` |
 | `ENCRYPTION_KEY`           | Secret used to derive a Fernet key for encrypting stored job credentials (basic auth, bearer tokens, cookies). **Change in production.** Rotating this key invalidates all stored credentials and the gateway will fail loudly when it cannot decrypt. | `change-me-in-production`        |
