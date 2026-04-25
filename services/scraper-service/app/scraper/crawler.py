@@ -88,8 +88,71 @@ class Crawler:
         self._domain_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._global_semaphore: Optional[asyncio.Semaphore] = None
 
-    async def crawl(self, job_id: str, config: dict):
-        """Execute a crawl job."""
+    @staticmethod
+    def _extract_freshness_meta(headers: Dict[str, Any], size: int = 0) -> dict:
+        """Pull ETag, Last-Modified, Content-Length, Content-Type from response headers."""
+        h = {k.lower(): v for k, v in headers.items()}
+        cl_str = str(h.get("content-length", "")).strip()
+        try:
+            content_length = int(cl_str) if cl_str.isdigit() else size
+        except (ValueError, TypeError):
+            content_length = size
+        return {
+            "etag": h.get("etag"),
+            "last_modified": h.get("last-modified"),
+            "content_length": content_length,
+            "content_type": h.get("content-type", ""),
+        }
+
+    @staticmethod
+    def _is_fresh(sidecar: dict, head_headers: Dict[str, Any]) -> bool:
+        """Return True if the on-disk file is byte-identical to what HEAD reports.
+
+        Priority: ETag > Last-Modified > Content-Length. If none of these are
+        comparable, return False (re-download to be safe).
+        """
+        if not sidecar:
+            return False
+        h = {k.lower(): v for k, v in head_headers.items()}
+
+        s_etag, h_etag = sidecar.get("etag"), h.get("etag")
+        if s_etag and h_etag:
+            return s_etag == h_etag
+
+        s_lm, h_lm = sidecar.get("last_modified"), h.get("last-modified")
+        if s_lm and h_lm:
+            return s_lm == h_lm
+
+        s_cl = sidecar.get("content_length")
+        h_cl_str = str(h.get("content-length", "")).strip()
+        if s_cl and h_cl_str.isdigit():
+            return int(s_cl) == int(h_cl_str)
+
+        return False
+
+    async def cleanup_for_fresh_run(self, job_id: str):
+        """Wipe Redis transient state and on-disk crawl_state.json for a fresh re-run.
+
+        Leaves saved pages/, assets/, results/ on disk — those are verified
+        per-URL via HEAD freshness during the new crawl.
+        """
+        await self.redis.delete(
+            f"scraper:pages:{job_id}",
+            f"scraper:resources:{job_id}",
+            f"scraper:result:{job_id}",
+            f"scraper:signal:{job_id}",
+        )
+        state_file = Path(settings.DATA_DIR) / "jobs" / job_id / "crawl_state.json"
+        if state_file.exists():
+            try:
+                state_file.unlink()
+            except OSError as e:
+                logger.warning(f"Failed to remove {state_file}: {e}")
+
+    async def crawl(self, job_id: str, config: dict, resume: bool = False):
+        """Execute a crawl job. When resume=False, the caller is expected to have
+        invoked cleanup_for_fresh_run(); we still load_state() defensively in case
+        crawl_state.json lingers, but with no visited_urls the seed loop fires."""
         job_dir = Path(settings.DATA_DIR) / "jobs" / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
 
@@ -334,28 +397,76 @@ class Crawler:
         async with self._global_semaphore:
             async with domain_sem:
                 try:
-                    if self._crawl_mode == "browser" and self._browser_context:
-                        html, content_type, page_size = await self._fetch_browser(
-                            self._browser_context, url, retry_limit=self._retry_limit,
-                        )
-                    else:
-                        html, content_type, page_size = await self._fetch_http(
-                            client, url, retry_limit=self._retry_limit,
-                        )
+                    # Disk + HEAD freshness: if we have this page on disk and the
+                    # remote ETag/Last-Modified/Content-Length matches, reuse the
+                    # cached HTML instead of refetching.
+                    cached_path = self._storage.page_local_path(url)
+                    sidecar = self._storage.read_meta(cached_path) if cached_path.exists() else None
+                    html = None
+                    content_type = None
+                    page_size = 0
+                    response_headers: Dict[str, Any] = {}
+                    served_from_cache = False
+                    if sidecar:
+                        try:
+                            head = await client.head(
+                                url, timeout=10.0, follow_redirects=True,
+                            )
+                            if head.status_code == 200 and self._is_fresh(sidecar, head.headers):
+                                html = cached_path.read_text(encoding="utf-8")
+                                content_type = sidecar.get("content_type") or head.headers.get(
+                                    "content-type", "text/html",
+                                )
+                                page_size = cached_path.stat().st_size
+                                response_headers = dict(head.headers)
+                                served_from_cache = True
+                        except Exception as e:
+                            logger.debug(f"Freshness HEAD failed for {url}: {e}")
+
                     if html is None:
-                        return
+                        if self._crawl_mode == "browser" and self._browser_context:
+                            html, content_type, page_size, response_headers = await self._fetch_browser(
+                                self._browser_context, url, retry_limit=self._retry_limit,
+                            )
+                        else:
+                            html, content_type, page_size, response_headers = await self._fetch_http(
+                                client, url, retry_limit=self._retry_limit,
+                            )
+                        if html is None:
+                            return
 
-                    async with self._state_lock:
-                        state.bytes_downloaded += page_size
-                        state.pages_downloaded += 1
-
-                    local_path = self._storage.save_page(url, html)
                     soup = BeautifulSoup(html, "lxml")
                     title = soup.title.string.strip() if soup.title and soup.title.string else None
+
+                    if served_from_cache:
+                        # Refresh sidecar with the latest HEAD-confirmed metadata
+                        # so subsequent runs can compare against current values.
+                        meta = self._extract_freshness_meta(response_headers, page_size)
+                        meta.update({
+                            "url": url, "title": title,
+                            "fetched_at": datetime.utcnow().isoformat(),
+                            "from_cache": True,
+                        })
+                        self._storage.write_meta(cached_path, meta)
+                        local_path = f"pages/{cached_path.name}"
+                    else:
+                        meta = self._extract_freshness_meta(response_headers, page_size)
+                        meta.update({
+                            "url": url, "title": title,
+                            "fetched_at": datetime.utcnow().isoformat(),
+                            "from_cache": False,
+                        })
+                        local_path = self._storage.save_page(url, html, meta=meta)
+                        async with self._state_lock:
+                            state.bytes_downloaded += page_size
+
+                    async with self._state_lock:
+                        state.pages_downloaded += 1
 
                     await self._publish_event(self._job_id, "PAGE_DOWNLOADED", {
                         "url": url, "status": 200, "size": page_size,
                         "content_type": content_type, "depth": depth, "title": title,
+                        "from_cache": served_from_cache,
                     })
 
                     page_record = {
@@ -439,7 +550,7 @@ class Crawler:
 
     async def _fetch_with_retry(self, fetcher, url: str, retry_limit: int):
         """Run `fetcher()` with retry on transient failures (timeout, 5xx, network errors).
-        Returns (html, content_type, size) or (None, None, 0) on permanent failure.
+        Returns (html, content_type, size, headers) or (None, None, 0, {}) on permanent failure.
         """
         attempts = max(1, retry_limit + 1)
         last_err = None
@@ -452,36 +563,37 @@ class Crawler:
                     last_err = e
                 else:
                     logger.warning(f"Fetch failed for {url}: HTTP {e.response.status_code}")
-                    return None, None, 0
+                    return None, None, 0, {}
             except (httpx.TimeoutException, httpx.NetworkError, asyncio.TimeoutError) as e:
                 last_err = e
                 if i >= attempts - 1:
                     logger.warning(f"Fetch failed for {url} after {attempts} attempts: {e}")
-                    return None, None, 0
+                    return None, None, 0, {}
             except Exception as e:
                 # Non-transient (parsing, browser-level) — don't retry
                 logger.warning(f"Fetch failed for {url}: {e}")
-                return None, None, 0
+                return None, None, 0, {}
 
             # Exponential backoff before retry
             await asyncio.sleep((settings.SCRAPER_RETRY_BACKOFF_MS / 1000.0) * (2 ** i))
             logger.info(f"Retrying {url} (attempt {i + 2}/{attempts}) after {last_err}")
 
-        return None, None, 0
+        return None, None, 0, {}
 
     async def _fetch_http(self, client: httpx.AsyncClient, url: str, retry_limit: int = 0):
-        """Fetch a page via HTTP. Returns (html, content_type, size)."""
+        """Fetch a page via HTTP. Returns (html, content_type, size, headers)."""
         async def do_fetch():
             resp = await client.get(url)
             resp.raise_for_status()  # so retry_with logic catches 5xx
             content_type = resp.headers.get("content-type", "")
+            headers = dict(resp.headers)
             if "text/html" not in content_type and "xhtml" not in content_type:
-                return None, content_type, 0
-            return resp.text, content_type, len(resp.content)
+                return None, content_type, 0, headers
+            return resp.text, content_type, len(resp.content), headers
         return await self._fetch_with_retry(do_fetch, url, retry_limit)
 
     async def _fetch_browser(self, context, url: str, retry_limit: int = 0):
-        """Fetch a page via Playwright browser. Returns (html, content_type, size).
+        """Fetch a page via Playwright browser. Returns (html, content_type, size, headers).
 
         Uses domcontentloaded as primary signal (won't hang on ad-heavy sites
         that never reach networkidle), then waits briefly for additional content.
@@ -491,14 +603,15 @@ class Crawler:
             try:
                 resp = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 if not resp:
-                    return None, None, 0
+                    return None, None, 0, {}
                 try:
                     await page.wait_for_load_state("load", timeout=15000)
                 except Exception:
                     pass
+                headers = dict(resp.headers)
                 content_type = resp.headers.get("content-type", "text/html")
                 html = await page.content()
-                return html, content_type, len(html.encode())
+                return html, content_type, len(html.encode()), headers
             finally:
                 await page.close()
         return await self._fetch_with_retry(do_fetch, url, retry_limit)
@@ -509,6 +622,9 @@ class Crawler:
         - HEAD: cheap probe of Content-Type and Content-Length. Re-categorize
           based on server-reported MIME (more accurate than extension guessing).
           Skip entirely if file exceeds MAX_ASSET_SIZE.
+        - Disk + freshness: if the asset already exists locally and HEAD
+          confirms the remote is unchanged (ETag/Last-Modified/Content-Length),
+          reuse the on-disk copy and skip the GET.
         - GET: streaming download with chunk-level size enforcement so we don't
           accumulate megabytes of memory if the server lies about Content-Length.
         - Some servers don't support HEAD (405). Fall back to streaming GET in
@@ -516,6 +632,7 @@ class Crawler:
         """
         max_asset = settings.MAX_ASSET_SIZE
         skip_size_check = False
+        head_headers: Dict[str, Any] = {}
 
         try:
             # ── HEAD probe ────────────────────────────────────────────────
@@ -527,6 +644,7 @@ class Crawler:
                 elif head.status_code != 200:
                     return
                 else:
+                    head_headers = dict(head.headers)
                     head_ct = head.headers.get("content-type", "")
                     head_len_str = head.headers.get("content-length", "")
                     head_len = int(head_len_str) if head_len_str.isdigit() else 0
@@ -544,6 +662,52 @@ class Crawler:
                         await self._publish_event(job_id, "SCRAPE_ERROR", {
                             "url": url,
                             "error": f"Skipped — file too large ({head_len} bytes)",
+                        })
+                        return
+
+                    # Disk freshness: if local copy exists and HEAD says nothing
+                    # has changed, reuse it without re-downloading.
+                    cached_asset = storage.asset_local_path(url)
+                    sidecar = storage.read_meta(cached_asset) if cached_asset.exists() else None
+                    if sidecar and self._is_fresh(sidecar, head_headers):
+                        size = cached_asset.stat().st_size
+                        content_hash = sidecar.get("content_hash")
+                        if not content_hash:
+                            content_hash = storage.content_hash(cached_asset.read_bytes())
+                        if content_hash in state.downloaded_hashes:
+                            return
+                        state.downloaded_hashes.add(content_hash)
+                        # Refresh sidecar's HEAD-confirmed metadata
+                        refreshed = self._extract_freshness_meta(head_headers, size)
+                        refreshed.update({
+                            "url": url, "category": category,
+                            "content_hash": content_hash,
+                            "fetched_at": datetime.utcnow().isoformat(),
+                            "from_cache": True,
+                        })
+                        storage.write_meta(cached_asset, refreshed)
+                        async with self._state_lock:
+                            state.resources_downloaded += 1
+                        resource_record = {
+                            "id": str(uuid.uuid4()),
+                            "job_id": job_id,
+                            "url": url,
+                            "local_path": f"assets/{cached_asset.name}",
+                            "filename": Path(urlparse(url).path).name or "unknown",
+                            "category": category,
+                            "size": size,
+                            "mime_type": head_ct,
+                            "content_hash": content_hash,
+                        }
+                        await self.redis.rpush(
+                            f"scraper:resources:{job_id}",
+                            json.dumps(resource_record),
+                        )
+                        await self._publish_event(job_id, "RESOURCE_DOWNLOADED", {
+                            "filename": resource_record["filename"],
+                            "category": category,
+                            "size": size,
+                            "from_cache": True,
                         })
                         return
             except httpx.TimeoutException:
@@ -592,7 +756,18 @@ class Crawler:
                 return
             state.downloaded_hashes.add(content_hash)
 
-            local_path, _ = storage.save_asset(url, content)
+            # Persist the freshness sidecar alongside the asset, preferring
+            # HEAD headers (more reliable for streaming responses) and falling
+            # back to GET response headers when HEAD was skipped.
+            meta_source = head_headers or dict(resp.headers)
+            meta = self._extract_freshness_meta(meta_source, len(content))
+            meta.update({
+                "url": url, "category": category,
+                "content_hash": content_hash,
+                "fetched_at": datetime.utcnow().isoformat(),
+                "from_cache": False,
+            })
+            local_path, _ = storage.save_asset(url, content, meta=meta)
             state.bytes_downloaded += len(content)
             state.resources_downloaded += 1
 
@@ -615,6 +790,7 @@ class Crawler:
                 "filename": resource_record["filename"],
                 "category": category,
                 "size": len(content),
+                "from_cache": False,
             })
 
         except Exception as e:
@@ -634,15 +810,24 @@ class Crawler:
         return list(set(links))
 
     def _extract_assets(self, html: str, base_url: str) -> list:
-        """Extract asset URLs (images, CSS, etc.) from HTML."""
+        """Extract asset URLs (images, CSS, etc.) from HTML.
+
+        Prefers `data-original-*` attributes when present, since cached pages
+        read back from disk have their src/href rewritten to local paths.
+        """
         soup = BeautifulSoup(html, "lxml")
         assets = set()
 
-        for img in soup.find_all("img", src=True):
-            assets.add(urljoin(base_url, img["src"]))
-        for link in soup.find_all("link", href=True):
-            if link.get("rel") and "stylesheet" in link["rel"]:
-                assets.add(urljoin(base_url, link["href"]))
+        for img in soup.find_all("img"):
+            src = img.get("data-original-src") or img.get("src")
+            if src:
+                assets.add(urljoin(base_url, src))
+        for link in soup.find_all("link"):
+            rel = link.get("rel")
+            if rel and "stylesheet" in rel:
+                href = link.get("data-original-href") or link.get("href")
+                if href:
+                    assets.add(urljoin(base_url, href))
         for source in soup.find_all("source", src=True):
             assets.add(urljoin(base_url, source["src"]))
 

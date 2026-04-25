@@ -181,8 +181,27 @@ async def start_scrape(job_id: str, request: Request):
     job = await db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job["status"] not in ("created", "paused", "failed"):
+    if job["status"] not in ("created", "paused", "failed", "cancelled", "scraped", "completed"):
         raise HTTPException(status_code=400, detail=f"Cannot start scrape from status '{job['status']}'")
+
+    # Resume only when the prior run was paused mid-flight. Every other
+    # entry path (re-run after completion, retry after failure) treats this
+    # as a fresh crawl and clears stale page/resource rows so they don't
+    # accumulate; the scraper's per-URL HEAD freshness check still avoids
+    # re-downloading unchanged content from disk.
+    is_resume = job["status"] == "paused"
+    if not is_resume:
+        # Order matters: drop the Redis lists FIRST so the redis_consumer
+        # can't drain stale records back into scrape_pages/scrape_resources
+        # during the brief window between the DB wipe and the scraper's own
+        # cleanup_for_fresh_run().
+        await request.app.state.redis.delete(
+            f"scraper:pages:{job_id}",
+            f"scraper:resources:{job_id}",
+            f"scraper:result:{job_id}",
+            f"scraper:signal:{job_id}",
+        )
+        await db.clear_scrape_data(job_id)
 
     # Decrypt sensitive auth fields before forwarding (scraper sees plaintext only)
     try:
@@ -196,7 +215,11 @@ async def start_scrape(job_id: str, request: Request):
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{settings.SCRAPER_SERVICE_URL}/scraper/start",
-                json={"job_id": job_id, "scrape_config": decrypted_config},
+                json={
+                    "job_id": job_id,
+                    "scrape_config": decrypted_config,
+                    "resume": is_resume,
+                },
             )
             resp.raise_for_status()
     except httpx.HTTPError as e:
@@ -209,7 +232,7 @@ async def start_scrape(job_id: str, request: Request):
 
     await ws_manager.broadcast_event("SCRAPE_STATUS", job_id, {"status": "scraping"})
 
-    return {"job_id": job_id, "status": "scraping", "message": "Scrape started"}
+    return {"job_id": job_id, "status": "scraping", "message": "Scrape started", "resume": is_resume}
 
 
 @router.post("/{job_id}/pause")

@@ -18,6 +18,7 @@ async def start_crawl(request: Request):
     body = await request.json()
     job_id = body.get("job_id")
     config = body.get("scrape_config", {})
+    resume = bool(body.get("resume", False))
 
     if not job_id:
         raise HTTPException(status_code=400, detail="job_id is required")
@@ -28,9 +29,14 @@ async def start_crawl(request: Request):
 
     crawler = Crawler(redis_client=request.app.state.redis)
 
+    # Fresh re-runs wipe Redis transient state and the on-disk crawl_state.json
+    # so the seed loop fires and the crawler doesn't think it has nothing to do.
+    if not resume:
+        await crawler.cleanup_for_fresh_run(job_id)
+
     async def run_crawl():
         try:
-            await crawler.crawl(job_id, config)
+            await crawler.crawl(job_id, config, resume=resume)
         except Exception as e:
             import json
             await request.app.state.redis.publish("scraper_events", json.dumps({
@@ -44,7 +50,7 @@ async def start_crawl(request: Request):
     task = asyncio.create_task(run_crawl())
     request.app.state.active_crawls[job_id] = task
 
-    return {"job_id": job_id, "status": "started"}
+    return {"job_id": job_id, "status": "started", "resume": resume}
 
 
 @router.post("/pause/{job_id}")

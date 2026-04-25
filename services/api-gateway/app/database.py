@@ -226,11 +226,33 @@ class Database:
         return row['count']
 
     async def delete_job(self, job_id: str, delete_results: bool = True) -> None:
-        if delete_results:
-            await self._db.execute("DELETE FROM extraction_results WHERE job_id = ?", (job_id,))
-            await self._db.execute("DELETE FROM scrape_resources WHERE job_id = ?", (job_id,))
-            await self._db.execute("DELETE FROM scrape_pages WHERE job_id = ?", (job_id,))
+        # DB metadata always goes (page/resource indexes, extraction rows, job
+        # row). The `delete_results` flag controls disk files only — handled
+        # by the route layer.
+        await self._db.execute("DELETE FROM extraction_results WHERE job_id = ?", (job_id,))
+        await self._db.execute("DELETE FROM scrape_resources WHERE job_id = ?", (job_id,))
+        await self._db.execute("DELETE FROM scrape_pages WHERE job_id = ?", (job_id,))
         await self._db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        await self._db.commit()
+
+    async def clear_scrape_data(self, job_id: str) -> None:
+        """Clear scrape_pages, scrape_resources, and reset job counters.
+
+        Used when re-running a scrape so the database doesn't accumulate stale
+        rows from the prior run. Disk files and the job row itself are kept.
+        """
+        await self._db.execute("DELETE FROM scrape_resources WHERE job_id = ?", (job_id,))
+        await self._db.execute("DELETE FROM scrape_pages WHERE job_id = ?", (job_id,))
+        await self._db.execute(
+            """UPDATE jobs SET
+                progress = 0.0, progress_message = '',
+                pages_discovered = 0, pages_downloaded = 0,
+                resources_discovered = 0, resources_downloaded = 0,
+                bytes_downloaded = 0, error_message = NULL,
+                scraped_at = NULL, completed_at = NULL
+               WHERE id = ?""",
+            (job_id,),
+        )
         await self._db.commit()
 
     # ── Schemas ───────────────────────────────────────────────────────────

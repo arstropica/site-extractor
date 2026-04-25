@@ -40,6 +40,8 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
   const isFailed = activeJob.status === 'failed'
   const isRunning = activeJob.status === 'scraping'
   const isPaused = activeJob.status === 'paused'
+  const isCancelled = activeJob.status === 'cancelled'
+  const canRerun = isComplete || isFailed || isCancelled
 
   const totalDiscovered = (activeJob.pages_discovered ?? 0) + (activeJob.resources_discovered ?? 0)
   const totalDownloaded = (activeJob.pages_downloaded ?? 0) + (activeJob.resources_downloaded ?? 0)
@@ -55,6 +57,20 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
   const handleResume = async () => {
     await jobsApi.startScrape(activeJob.id)
     updateActiveJob({ status: 'scraping' })
+  }
+
+  const handleRerun = async () => {
+    if (!confirm('Re-run this scrape? Pages and resources unchanged on the server will be reused from disk; the rest will be re-downloaded.')) return
+    await jobsApi.startScrape(activeJob.id)
+    updateActiveJob({
+      status: 'scraping',
+      pages_downloaded: 0,
+      pages_discovered: 0,
+      resources_downloaded: 0,
+      resources_discovered: 0,
+      bytes_downloaded: 0,
+      error_message: undefined,
+    })
   }
 
   const handleCancel = async () => {
@@ -135,6 +151,14 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
           <button className="btn btn-sm btn-ghost text-error gap-1" onClick={handleCancel}>
             <span className="icon-[tabler--x] size-4" />
             Cancel
+          </button>
+        </div>
+      )}
+      {canRerun && (
+        <div className="flex gap-2">
+          <button className="btn btn-sm btn-primary gap-1" onClick={handleRerun}>
+            <span className="icon-[tabler--refresh] size-4" />
+            Re-scrape
           </button>
         </div>
       )}

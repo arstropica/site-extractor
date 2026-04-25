@@ -1,6 +1,7 @@
 """Page storage — saves scraped HTML with rewritten asset URLs."""
 
 import hashlib
+import json
 import os
 import re
 from pathlib import Path
@@ -49,7 +50,34 @@ class PageStorage:
             base = base[:80]
         return f"{name_hash}_{base}"
 
-    def save_page(self, url: str, html: str, base_url: str = None) -> str:
+    def page_local_path(self, url: str) -> Path:
+        """Return the absolute local path where this URL's HTML would be saved."""
+        return self.pages_dir / self.url_to_filename(url)
+
+    def asset_local_path(self, url: str) -> Path:
+        """Return the absolute local path where this URL's asset would be saved."""
+        return self.assets_dir / self.asset_filename(url)
+
+    def _meta_path(self, file_path: Path) -> Path:
+        return file_path.with_suffix(file_path.suffix + ".meta.json")
+
+    def read_meta(self, file_path: Path) -> Optional[dict]:
+        """Load the freshness sidecar for a given page or asset file, if present."""
+        meta = self._meta_path(file_path)
+        if not meta.exists():
+            return None
+        try:
+            return json.loads(meta.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def write_meta(self, file_path: Path, meta: dict) -> None:
+        """Persist the freshness sidecar next to the saved page or asset."""
+        self._meta_path(file_path).write_text(
+            json.dumps(meta, indent=2), encoding="utf-8",
+        )
+
+    def save_page(self, url: str, html: str, base_url: str = None, meta: dict = None) -> str:
         """Save HTML content with rewritten asset URLs. Returns local path relative to job_dir."""
         filename = self.url_to_filename(url)
         local_path = self.pages_dir / filename
@@ -92,9 +120,11 @@ class PageStorage:
 
         # Write processed HTML
         local_path.write_text(str(soup), encoding="utf-8")
+        if meta is not None:
+            self.write_meta(local_path, meta)
         return f"pages/{filename}"
 
-    def save_asset(self, url: str, content: bytes) -> tuple[str, str]:
+    def save_asset(self, url: str, content: bytes, meta: dict = None) -> tuple[str, str]:
         """Save an asset file. Returns (local_path relative to job_dir, content_hash)."""
         filename = self.asset_filename(url)
         local_path = self.assets_dir / filename
@@ -102,6 +132,8 @@ class PageStorage:
         content_hash = hashlib.sha256(content).hexdigest()
 
         local_path.write_bytes(content)
+        if meta is not None:
+            self.write_meta(local_path, meta)
         return f"assets/{filename}", content_hash
 
     def content_hash(self, content: bytes) -> str:
