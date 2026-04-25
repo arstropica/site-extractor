@@ -227,6 +227,20 @@ class Crawler:
                     user_agent=user_agent,
                     ignore_https_errors=True,
                 )
+
+                # Block image / font / media fetches in the browser. We extract
+                # asset URLs from the rendered HTML and download them ourselves
+                # via httpx; letting Chromium also fetch them doubles every
+                # request and on rate-limited CDNs (Wayback / Akamai-fronted
+                # origins) the browser's burst trips per-IP throttling that
+                # then blocks our httpx asset downloads too.
+                async def _block_unneeded(route):
+                    if route.request.resource_type in ("image", "media", "font"):
+                        await route.abort()
+                    else:
+                        await route.continue_()
+                await browser_context.route("**/*", _block_unneeded)
+
                 # Apply cookies for browser mode
                 if auth_method == "cookie" and auth_config.get("cookies"):
                     cookie_list = []
@@ -691,6 +705,44 @@ class Crawler:
         return await self._fetch_with_retry(do_fetch, url, retry_limit)
 
     async def _download_asset(self, client, url, job_id, storage, state, category, resource_filter):
+        """Public asset-download entry: handles retry-with-backoff for transient
+        connection errors, then delegates to _download_asset_once.
+
+        Rate-limited CDNs (especially Wayback / Akamai-fronted) drop TCP
+        connections in bursts but recover within seconds; without retries we
+        lose any asset that happens to hit a throttled connection slot, even
+        though the URL is fine.
+        """
+        attempts = max(1, self._retry_limit + 1)
+        last_err: Optional[Exception] = None
+        for i in range(attempts):
+            try:
+                await self._download_asset_once(
+                    client, url, job_id, storage, state, category, resource_filter,
+                )
+                return
+            except (httpx.ConnectError, httpx.NetworkError, httpx.TimeoutException, asyncio.TimeoutError) as e:
+                last_err = e
+                if i >= attempts - 1:
+                    break
+                backoff = (settings.SCRAPER_RETRY_BACKOFF_MS / 1000.0) * (2 ** i)
+                logger.info(
+                    f"Retrying asset {url} (attempt {i + 2}/{attempts}) after {backoff:.1f}s: {type(e).__name__}"
+                )
+                await asyncio.sleep(backoff)
+
+        # All retries exhausted — surface the cause.
+        msg = f"{type(last_err).__name__}: {last_err}" if last_err else "unknown"
+        logger.warning(f"Asset download failed for {url} after {attempts} attempts: {msg}")
+        try:
+            await self._publish_event(job_id, "SCRAPE_ERROR", {
+                "url": url,
+                "error": f"Asset download failed after {attempts} attempts: {msg}",
+            })
+        except Exception:
+            pass
+
+    async def _download_asset_once(self, client, url, job_id, storage, state, category, resource_filter):
         """HEAD first → check size + verify category from server MIME → stream GET with abort guard.
 
         - HEAD: cheap probe of Content-Type and Content-Length. Re-categorize
@@ -793,6 +845,9 @@ class Crawler:
                             "from_cache": True,
                         })
                         return
+            except (httpx.ConnectError, httpx.NetworkError):
+                # Transient — let the outer retry wrapper handle it
+                raise
             except httpx.TimeoutException:
                 # HEAD timed out; try streaming GET anyway
                 skip_size_check = True
@@ -889,6 +944,9 @@ class Crawler:
                 "from_cache": False,
             })
 
+        except (httpx.ConnectError, httpx.NetworkError, httpx.TimeoutException, asyncio.TimeoutError):
+            # Transient — let the outer retry wrapper handle it
+            raise
         except Exception as e:
             msg = f"{type(e).__name__}: {e}"
             logger.warning(f"Asset download failed for {url}: {msg}")
