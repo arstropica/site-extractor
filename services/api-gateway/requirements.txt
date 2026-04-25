@@ -1,0 +1,11 @@
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+redis==5.2.0
+pydantic==2.10.6
+httpx==0.28.0
+websockets==14.0
+aiosqlite==0.20.0
+python-multipart==0.0.18
+cryptography==44.0.0
+cssselect==1.2.0
+lxml==5.3.0
