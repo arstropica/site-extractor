@@ -141,7 +141,7 @@ export default function WizardPage() {
     else failedSteps.add(currentStep)
   }
 
-  // Create job + start scrape
+  // Create job + start scrape (used when the user is on /job/new)
   const createAndStartMutation = useMutation({
     mutationFn: async ({ config, name }: { config: ScrapeConfig; name?: string }) => {
       const result = await jobs.create(config, name)
@@ -153,6 +153,26 @@ export default function WizardPage() {
       navigate(`/job/${result.job_id}`, { replace: true })
       await jobs.startScrape(result.job_id)
       const updated = await jobs.get(result.job_id)
+      setActiveJob(updated)
+    },
+  })
+
+  // Patch existing job + start scrape (used for cloned/edited 'created' jobs).
+  // Without this, submitting the form on a cloned job would call jobs.create()
+  // and produce a duplicate job alongside the clone.
+  const updateAndStartMutation = useMutation({
+    mutationFn: async ({ config, name }: { config: ScrapeConfig; name?: string }) => {
+      if (!activeJob) throw new Error('No active job to update')
+      const id = activeJob.id
+      await jobs.update(id, {
+        scrape_config: config,
+        name: name?.trim() || null,
+      })
+      markStepCompleted(0)
+      setCurrentStep(1)
+      clearScrapeEvents()
+      await jobs.startScrape(id)
+      const updated = await jobs.get(id)
       setActiveJob(updated)
     },
   })
@@ -260,10 +280,21 @@ export default function WizardPage() {
         <div className="card-body p-5 sm:p-6">
           {currentStep === 0 && (
             <ScraperConfigStep
-              onSubmit={(config, name) => createAndStartMutation.mutate({ config, name })}
+              // key forces a remount when the loaded job changes (e.g. after
+              // clicking clone, where activeJob.id flips but the component
+              // would otherwise keep its initial useState values from the
+              // previous job).
+              key={isNew ? 'new' : (activeJob?.id ?? 'loading')}
+              onSubmit={(config, name) =>
+                isNew
+                  ? createAndStartMutation.mutate({ config, name })
+                  : updateAndStartMutation.mutate({ config, name })
+              }
               initialConfig={activeJob?.scrape_config}
               initialName={activeJob?.name ?? ''}
-              isLoading={createAndStartMutation.isPending}
+              isLoading={
+                createAndStartMutation.isPending || updateAndStartMutation.isPending
+              }
               readOnly={!isNew && !!activeJob && activeJob.status !== 'created'}
             />
           )}

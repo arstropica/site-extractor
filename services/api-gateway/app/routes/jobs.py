@@ -137,6 +137,24 @@ async def update_job(job_id: str, request: Request):
     updates = {k: v for k, v in body.items() if k in allowed_fields}
     if "name" in updates and updates["name"] is not None:
         updates["name"] = updates["name"].strip() or None
+
+    # scrape_config edits are only allowed before the job has started — once
+    # we've crawled, changing the config retroactively would leave stale
+    # pages/resources keyed to a different config. Lets the wizard's
+    # "edit cloned job and start" flow PATCH the new job in place instead
+    # of creating a duplicate.
+    if "scrape_config" in body:
+        if job["status"] != "created":
+            raise HTTPException(
+                status_code=400,
+                detail=f"scrape_config can only be edited while status is 'created' (current: '{job['status']}')",
+            )
+        scrape_config = body["scrape_config"]
+        if not scrape_config.get("seed_urls"):
+            raise HTTPException(status_code=400, detail="At least one seed URL is required")
+        # Encrypt sensitive auth fields (matches create_job behavior)
+        updates["scrape_config"] = encrypt_scrape_config(scrape_config)
+
     if updates:
         await db.update_job(job_id, updates)
 
