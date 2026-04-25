@@ -1,0 +1,37 @@
+@import "tailwindcss";
+@plugin "flyonui";
+@source "../src/**/*.{ts,tsx}";
+
+@plugin "@iconify/tailwind4" {
+  prefixes: tabler;
+}
+
+/* Dark theme by default */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: oklch(50% 0 0 / 30%);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(50% 0 0 / 50%);
+}
