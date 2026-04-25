@@ -1,0 +1,99 @@
+services:
+  redis:
+    image: redis:7-alpine
+    expose: ["6379"]
+    volumes: ["redis-data:/data"]
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    networks:
+      - extractor_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    ports: ["${DOCKER_PORT:-12000}:8000"]
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_PATH=/data/extractor.db
+      - DATA_DIR=/data
+      - SCRAPER_SERVICE_URL=http://scraper-service:8001
+      - EXTRACTION_SERVICE_URL=http://extraction-service:8002
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-change-me-in-production}
+      - MAX_DOWNLOAD_SIZE=${MAX_DOWNLOAD_SIZE:-524288000}
+    volumes:
+      - data:/data
+    networks:
+      - extractor_network
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  scraper-service:
+    build:
+      context: .
+      dockerfile: services/scraper-service/Dockerfile
+    expose: ["8001"]
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATA_DIR=/data
+      - MAX_DOWNLOAD_SIZE=${MAX_DOWNLOAD_SIZE:-524288000}
+      - MAX_ASSET_SIZE=${MAX_ASSET_SIZE:-52428800}
+      - SCRAPER_RETRY_LIMIT=${SCRAPER_RETRY_LIMIT:-1}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+    volumes:
+      - data:/data
+    networks:
+      - extractor_network
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/scraper/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  extraction-service:
+    build:
+      context: .
+      dockerfile: services/extraction-service/Dockerfile
+    expose: ["8002"]
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATA_DIR=/data
+    volumes:
+      - data:/data
+    networks:
+      - extractor_network
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/extraction/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+networks:
+  extractor_network:
+    name: ${DOCKER_NETWORK:-extractor_network}
+
+volumes:
+  redis-data:
+  data:

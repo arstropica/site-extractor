@@ -1,0 +1,373 @@
+# Site Extractor
+
+**Two-Phase Site Spider and Content Extraction Tool**
+
+A self-hosted Docker Compose application for crawling websites and extracting structured data from the captured content. Wizard-driven UI guides users through scraper configuration, schema definition, point-and-click content mapping, and result export — with real-time progress, resumable jobs, and a boundary-scoped extraction model that handles complex nested layouts.
+
+---
+
+## Features
+
+- **Two-phase pipeline** — Phase 1 spiders the site to a local mirror; Phase 2 extracts structured data from stored pages. Phases are decoupled so mappings can be rebuilt without re-crawling.
+- **Two crawl modes** — Lightweight HTTP via httpx, or headless Chromium via Playwright for SPA / JavaScript-rendered content.
+- **Boundary-scoped extraction** — Cumulative CSS selector boundaries (root → record → collection iterator) handle nested and repeating layouts. Mappings live per-job; schemas are reusable.
+- **File-based extraction** — Regex-categorized filename listing for asset-heavy crawls (PDFs, media, archives).
+- **Point-and-click content mapper** — Scraped pages render in a sandboxed iframe with an injected picker that generates CSS selectors and live-highlights matches.
+- **Schema templates** — Reusable schemas with built-in templates (Article/Blog, Product Listing, Person Profile) editable in either a visual tree builder or a raw JSON editor.
+- **Cross-page record merging** — `merge_by` + `url_regex` collapse multiple pages-per-entity (e.g., separate Overview / Bio / GameLog tabs) into single merged records keyed by an extracted ID.
+- **Resource filtering** — Per-category include/exclude with extension lists; HEAD-first probing with size guards and content-hash deduplication.
+- **Authentication** — Basic, Bearer token, or cookie injection per job. Credentials are Fernet-encrypted at rest with `enc:v1:` versioning. Browser-driven login is deferred to v2.
+- **Domain allowlist + path filters** — Strict domain match with wildcard support; cross-domain redirects are recorded but not followed.
+- **Real-time progress** — WebSocket relay of scraper / extraction events: page tree updates, resource discovery, progress, status changes, errors.
+- **Resumable jobs** — Crawl state persists; orphaned `scraping` jobs are auto-resumed at startup.
+- **Result export** — JSON or CSV download from the Results step or via direct API.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Docker & Docker Compose (v2)
+- ~2 GB RAM headroom for the scraper service when using browser mode (Playwright Chromium)
+- Outbound HTTP/HTTPS access to the sites you intend to crawl
+
+CPU-only — there is no GPU dependency.
+
+### Installation
+
+```bash
+# Clone repository
+git clone <your-fork-url> site-extractor
+cd site-extractor
+
+# Configure environment
+cp .env.example .env
+# Edit .env — at minimum set ENCRYPTION_KEY to a long random value
+
+# Start services
+docker compose up -d --build
+
+# Verify
+curl http://localhost:12000/api/health | jq .
+
+# Open the UI
+open http://localhost:12000/
+```
+
+### Quick Test (via API)
+
+```bash
+# Create a job
+curl -X POST http://localhost:12000/api/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Example crawl",
+    "scrape_config": {
+      "seed_urls": ["https://example.com/"],
+      "crawl_mode": "http",
+      "depth_limit": 1,
+      "respect_robots": true,
+      "request_delay_ms": 500
+    }
+  }'
+# → { "job_id": "...", "status": "created", "message": "..." }
+
+JOB_ID="<paste-job-id-from-response>"
+
+# Start the scrape
+curl -X POST "http://localhost:12000/api/jobs/$JOB_ID/start-scrape"
+
+# Poll status
+curl "http://localhost:12000/api/jobs/$JOB_ID" | jq '{status, pages_downloaded, resources_downloaded, progress}'
+```
+
+Most users will drive the wizard at `http://localhost:12000/` rather than the API. The API is documented at `http://localhost:12000/docs` (FastAPI auto-generated Swagger UI).
+
+---
+
+## Architecture
+
+```
+┌──────────────────┐
+│   Browser (UI)   │  React 19 + Vite + Tailwind 4 + FlyonUI
+└────────┬─────────┘
+         │ HTTP / WebSocket
+         ▼
+┌──────────────────┐
+│   api-gateway    │ :12000 ← REST + WS hub, serves React SPA
+│   (FastAPI)      │         SQLite persistence, encrypted credentials
+└────┬─────────┬───┘
+     │         │
+     │         └────────────► extraction-service :8002 (internal)
+     │                          CSS selector engine, boundary scoping,
+     │                          merge_by, image download
+     │
+     └──────────────────────► scraper-service :8001 (internal)
+                                httpx + Playwright Chromium,
+                                sliding-window dispatcher,
+                                HEAD-first asset download
+
+┌──────────────────┐
+│      redis       │ :6379 (internal) ← pub/sub + page/resource lists
+└──────────────────┘
+```
+
+**4 services** (all coordinated via `docker-compose.yml`):
+
+- **api-gateway** — FastAPI orchestrator. Hosts REST endpoints, WebSocket relay, SQLite (jobs, schemas, page index, resource index), encrypted credential store, and the compiled React SPA as static assets.
+- **scraper-service** — Crawler with two modes (httpx / Playwright Chromium). Sliding-window async dispatcher, per-domain + global semaphores, HEAD-first asset probing with streaming size guard, Redis lists for page/resource sync to the gateway.
+- **extraction-service** — Boundary-scoped CSS extraction engine, URL-pattern filtering, image download, and `merge_by` cross-page record consolidation.
+- **redis** — Pub/sub channels (`scraper_events`, `extraction_events`) and lists (`scraper:pages`, `scraper:resources`) used by the gateway's consumer to sync into SQLite.
+
+The gateway is the only public service; the scraper and extraction services are reachable only on the internal Docker network.
+
+---
+
+## API Examples
+
+The gateway exposes a small REST surface; full Swagger UI is at `http://localhost:12000/docs`.
+
+### Create + start a job
+
+```bash
+curl -X POST http://localhost:12000/api/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Player profiles",
+    "scrape_config": {
+      "seed_urls": ["https://www.example.com/players"],
+      "crawl_mode": "browser",
+      "depth_limit": 2,
+      "domain_filter": {
+        "allowed_domains": ["www.example.com"],
+        "path_filters": ["/players/*"]
+      },
+      "respect_robots": false,
+      "request_delay_ms": 500,
+      "max_concurrent_per_domain": 2,
+      "max_concurrent_total": 8
+    }
+  }'
+
+curl -X POST http://localhost:12000/api/jobs/$JOB_ID/start-scrape
+```
+
+### Configure extraction with merge_by + url_regex
+
+```bash
+curl -X PATCH http://localhost:12000/api/jobs/$JOB_ID \
+  -H "Content-Type: application/json" \
+  -d '{
+    "extraction_config": {
+      "mode": "document",
+      "schema_id": "<your-schema-id>",
+      "document": {
+        "merge_by": "player_id",
+        "boundaries": [],
+        "field_mappings": [
+          { "field_path": "player_id",  "url_regex": "/id/(\\d+)" },
+          { "field_path": "first_name", "selector": ".PlayerHeader__Name span:nth-of-type(1)" },
+          { "field_path": "last_name",  "selector": ".PlayerHeader__Name span:nth-of-type(2)" }
+        ]
+      }
+    }
+  }'
+
+curl -X POST http://localhost:12000/api/extraction/$JOB_ID/start
+```
+
+### Preview, results, export
+
+```bash
+# Preview without persisting (capped by limit)
+curl -X POST http://localhost:12000/api/extraction/$JOB_ID/preview \
+  -H "Content-Type: application/json" \
+  -d '{ "extraction_config": {...}, "schema_fields": [...], "limit": 20 }'
+
+# Paginated results
+curl "http://localhost:12000/api/extraction/$JOB_ID/results?limit=50&offset=0"
+
+# Export
+curl -OJ "http://localhost:12000/api/extraction/$JOB_ID/results/export/json"
+curl -OJ "http://localhost:12000/api/extraction/$JOB_ID/results/export/csv?normalize=true"
+```
+
+### WebSocket events
+
+Connect to `ws://localhost:12000/ws` to receive `PAGE_DISCOVERED`, `PAGE_DOWNLOADED`, `RESOURCE_DISCOVERED`, `RESOURCE_DOWNLOADED`, `SCRAPE_PROGRESS`, `SCRAPE_STATUS`, `PAGE_TREE_UPDATE`, `EXTRACTION_PROGRESS`, and `EXTRACTION_STATUS` events in real time.
+
+---
+
+## Documentation
+
+- **[Requirements Specification](requirements.md)** — Full functional spec covering scraper, extraction, schema, UI behavior, and job lifecycle
+- **Live OpenAPI:** <http://localhost:12000/docs> (Swagger UI)
+- **WebSocket events:** see `services/shared/models.py` (`WSEventType` enum)
+
+---
+
+## Technology Stack
+
+**Frontend**
+
+- React 19 + TypeScript + Vite 8
+- Tailwind CSS 4 (compile-time via `@tailwindcss/vite`)
+- FlyonUI 2.4 component library
+- Radix UI primitives (Dialog, Dropdown, Select, Switch, Tabs, Toast, Tooltip)
+- Zustand state management
+- TanStack React Query for data fetching + cache invalidation
+- React Router v6
+- Tabler icons via Iconify
+
+**Backend**
+
+- FastAPI 0.115 + Python 3.11 + Uvicorn
+- Pydantic v2 for shared API contracts
+- aiosqlite for async SQLite persistence
+- Redis 7 (pub/sub + lists) via `redis-py` async client
+- httpx 0.28 for HTTP scraping
+- Playwright 1.49 + Chromium for browser scraping
+- BeautifulSoup 4 + SoupSieve (`:has()`-capable CSS selectors) + lxml for extraction
+- cryptography (Fernet) for credential encryption at rest
+
+**Deployment**
+
+- Multi-stage Docker builds (Node UI build → Python runtime)
+- Docker Compose v2
+- Single SQLite database + Docker named volume for persistent data
+
+---
+
+## Configuration
+
+### Environment Variables
+
+All variables are read from the `.env` file at the project root (or the host environment). `docker-compose.yml` propagates the relevant subset into each service container.
+
+| Name                       | Description                                                                                                                                                                                                                                            | Default                          |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
+| `DOCKER_PORT`              | Host port published by `api-gateway`; UI + REST + WS are all served from this port.                                                                                                                                                                    | `12000`                          |
+| `DOCKER_NETWORK`           | Name of the Docker bridge network shared by all services.                                                                                                                                                                                              | `extractor_network`              |
+| `REDIS_URL`                | Redis connection URL used by every service for pub/sub and list-based sync.                                                                                                                                                                            | `redis://redis:6379`             |
+| `DATABASE_PATH`            | SQLite database file path inside the api-gateway container.                                                                                                                                                                                            | `/data/extractor.db`             |
+| `DATA_DIR`                 | Root directory inside each container for scraped pages, downloaded assets, and the database. Backed by the `data` Docker volume.                                                                                                                       | `/data`                          |
+| `SCRAPER_SERVICE_URL`      | Internal URL the api-gateway uses to reach the scraper service.                                                                                                                                                                                        | `http://scraper-service:8001`    |
+| `EXTRACTION_SERVICE_URL`   | Internal URL the api-gateway uses to reach the extraction service.                                                                                                                                                                                     | `http://extraction-service:8002` |
+| `ENCRYPTION_KEY`           | Secret used to derive a Fernet key for encrypting stored job credentials (basic auth, bearer tokens, cookies). **Change in production.** Rotating this key invalidates all stored credentials and the gateway will fail loudly when it cannot decrypt. | `change-me-in-production`        |
+| `MAX_DOWNLOAD_SIZE`        | Total bytes a single job is allowed to download across all pages and assets. Per-job override available via `scrape_config.max_download_size`. Units: bytes.                                                                                           | `524288000` (500 MB)             |
+| `MAX_ASSET_SIZE`           | Per-asset size cap. Files larger than this are skipped without downloading (HEAD probe first; falls back to streaming guard). Units: bytes.                                                                                                            | `52428800` (50 MB)               |
+| `SCRAPER_RETRY_LIMIT`      | Number of retry attempts per URL on transient failures (5xx, timeouts, connection resets). Per-job override via `scrape_config.retry_limit`.                                                                                                           | `1`                              |
+| `SCRAPER_RETRY_BACKOFF_MS` | Backoff delay between retries, in milliseconds.                                                                                                                                                                                                        | `2000`                           |
+| `BROWSER_POOL_SIZE`        | Number of concurrent Playwright browser contexts the scraper keeps open in browser mode.                                                                                                                                                               | `5`                              |
+| `HTTP_PROXY`               | Optional HTTP proxy URL passed through to httpx and Playwright.                                                                                                                                                                                        | `` (unset)                       |
+| `HTTPS_PROXY`              | Optional HTTPS proxy URL passed through to httpx and Playwright.                                                                                                                                                                                       | `` (unset)                       |
+
+### Per-job overrides
+
+Several environment defaults can be overridden per job via the `scrape_config` payload:
+
+- `max_download_size` — overrides `MAX_DOWNLOAD_SIZE`
+- `retry_limit` — overrides `SCRAPER_RETRY_LIMIT`
+- `request_delay_ms`, `max_concurrent_per_domain`, `max_concurrent_total` — rate limiting
+- `respect_robots`, `user_agent`, `auth`, `domain_filter`, `resource_filters` — crawl behavior
+
+Defaults are defined in `services/shared/models.py` (`ScrapeConfig`) and `DEFAULT_RESOURCE_FILTERS`.
+
+---
+
+## Development
+
+```bash
+# Build + start
+docker compose up -d --build
+
+# Tail logs
+docker compose logs -f api-gateway
+docker compose logs -f scraper-service
+docker compose logs -f extraction-service
+
+# Rebuild a single service after code changes
+docker compose up -d --build api-gateway
+
+# Inspect Redis
+docker compose exec redis redis-cli
+> KEYS *
+> LRANGE scraper:pages 0 10
+> SUBSCRIBE scraper_events
+
+# Inspect SQLite
+docker compose exec api-gateway sqlite3 /data/extractor.db
+sqlite> .tables
+sqlite> SELECT id, name, status, pages_downloaded FROM jobs ORDER BY created_at DESC LIMIT 10;
+
+# UI dev server (proxies /api → :12000)
+cd services/ui
+npm install
+npm run dev
+```
+
+---
+
+## Troubleshooting
+
+### Service won't start / unhealthy
+
+```bash
+docker compose ps
+docker compose logs api-gateway --tail 100
+docker compose logs scraper-service --tail 100
+```
+
+The scraper container has a 30-second `start_period` because Playwright Chromium initialization is heavy.
+
+### Crawl skipping files
+
+- Check the **Resource Filters** for the job — non-HTML extensions (e.g. `m4v`, `pdf`) need to be in an enabled category.
+- Check `MAX_ASSET_SIZE` — files larger than this are skipped during HEAD probe. Bump it for media-heavy crawls (e.g. `MAX_ASSET_SIZE=262144000` for 250 MB).
+- Check `respect_robots` — sites often disallow asset paths in `robots.txt`.
+
+### Stored credentials fail to decrypt
+
+Rotating `ENCRYPTION_KEY` invalidates all stored credentials. The gateway raises `CredentialDecryptError` on read rather than silently producing garbage. Recreate affected jobs with fresh credentials, or restore the previous key.
+
+### Browser mode never finishes loading
+
+Some sites never reach `networkidle` (long-polling, telemetry, etc.). The scraper falls back to `domcontentloaded` + best-effort `load` with a 15s timeout, so pages still capture; if they don't, increase `request_delay_ms` and reduce concurrency.
+
+### Port 12000 already in use
+
+Set `DOCKER_PORT=<free-port>` in `.env` and `docker compose up -d`.
+
+---
+
+## Roadmap
+
+### v1 (Complete)
+
+- [x] Two-phase scrape + extract pipeline
+- [x] HTTP + Playwright crawl modes
+- [x] Sliding-window async dispatcher with per-domain + global rate limiting
+- [x] Boundary-scoped extraction with URL pattern filtering
+- [x] File-based regex extraction
+- [x] Schema templates + visual builder + JSON editor
+- [x] Point-and-click content mapper with iframe injection
+- [x] Real-time WebSocket progress events
+- [x] Resumable jobs (auto-resume orphans on startup)
+- [x] Encrypted credential storage (Fernet, fail-loudly)
+- [x] `merge_by` + `url_regex` cross-page record consolidation
+- [x] JSON / CSV export
+
+### v2 (Planned)
+
+- [ ] Browser-driven interactive login (remote browser streaming, replaces cookie-export workflow)
+- [ ] Multi-strategy merge (`first_non_null` is the only strategy today)
+- [ ] Scheduled / recurring jobs
+- [ ] Job-level cost / quota dashboards
+- [ ] Pluggable post-processing (transform pipelines on extracted records)
+
+---
+
+## License
+
+(TBD)
