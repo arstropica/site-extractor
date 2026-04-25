@@ -550,15 +550,20 @@ class Crawler:
 
                     # Asset downloads embedded in this page (img/link/source) —
                     # also parallelized within this URL's processing.
+                    # Permissive prefilter: keep anything not explicitly
+                    # excluded by extension. Category is a hint; _download_asset
+                    # re-categorizes from the HEAD/GET MIME, which is the only
+                    # reliable signal for image-CDN / proxy URLs that hide the
+                    # extension in the query string or omit it entirely.
                     asset_urls = self._extract_assets(html, url)
                     asset_tasks = []
                     asset_sem = asyncio.Semaphore(self._max_total)
                     for asset_url in asset_urls:
-                        if not resource_filter.should_download(asset_url):
+                        if not resource_filter.should_consider(asset_url):
                             continue
-                        category = resource_filter.get_category(asset_url)
+                        category_hint = resource_filter.get_category(asset_url)
 
-                        async def _bounded(u=asset_url, c=category):
+                        async def _bounded(u=asset_url, c=category_hint):
                             async with asset_sem:
                                 await self._download_asset(
                                     client, u, self._job_id, self._storage, state, c, resource_filter,
@@ -722,10 +727,15 @@ class Crawler:
                     head_len_str = head.headers.get("content-length", "")
                     head_len = int(head_len_str) if head_len_str.isdigit() else 0
 
-                    # Re-verify category using server-reported MIME
+                    # Re-verify category using server-reported MIME. The HEAD
+                    # probe is the authoritative source — extension/query-string
+                    # heuristics upstream may have left the hint as None.
                     actual_cat = resource_filter.get_category(url, head_ct)
-                    if not actual_cat:
-                        return  # filter excludes this file
+                    if not actual_cat or actual_cat == "web_pages":
+                        # Filter excludes, OR the URL is actually an HTML page
+                        # masquerading as an embedded asset — let the page path
+                        # handle web pages, not asset storage.
+                        return
                     category = actual_cat
 
                     if head_len > max_asset:
@@ -811,10 +821,11 @@ class Crawler:
                     })
                     return
 
-                # Re-verify category if HEAD was skipped
-                if skip_size_check:
+                # Re-verify category if HEAD was skipped (or never gave us
+                # one). Server MIME wins over extension hints upstream.
+                if skip_size_check or category is None:
                     actual_cat = resource_filter.get_category(url, resp_ct)
-                    if not actual_cat:
+                    if not actual_cat or actual_cat == "web_pages":
                         return
                     category = actual_cat
 

@@ -81,36 +81,70 @@ class ResourceFilter:
                         self.ext_include[clean] = cat_key
 
     def get_category(self, url: str, mime_type: Optional[str] = None) -> Optional[str]:
-        """Determine the category for a URL. Returns None if the resource should be skipped."""
-        # Try extension first
+        """Determine the category for a URL. Returns None if the resource should be skipped.
+
+        Priority:
+          1. Path extension excludes → reject (user-configured definitive deny).
+          2. Server-reported MIME → category (authoritative when present).
+          3. Path extension includes → category (user-configured allow list).
+          4. Stdlib mimetypes.guess_type → category (catches uncommon extensions).
+          5. Reject.
+
+        Step 2 wins over step 3 because the server's Content-Type reflects what
+        is actually being served — extensions can be missing, lying, or hidden
+        in the query string (image CDNs, Wayback combiner URLs, etc.).
+        """
         parsed = urlparse(url)
         path = parsed.path.rstrip("/")
-        if "." in path:
-            ext = path.rsplit(".", 1)[-1].lower()
-            if ext in self.ext_exclude:
-                return None
-            if ext in self.ext_include:
-                return self.ext_include[ext]
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else None
 
-        # Try mime type
+        # 1. Excludes win definitively
+        if ext and ext in self.ext_exclude:
+            return None
+
+        # 2. MIME first (authoritative when we have it)
         if mime_type:
             clean_mime = mime_type.split(";")[0].strip().lower()
             cat = MIME_TO_CATEGORY.get(clean_mime)
             if cat and cat in self.enabled_categories:
                 return cat
 
-        # Try guessing mime from URL
+        # 3. User-configured extension include
+        if ext and ext in self.ext_include:
+            return self.ext_include[ext]
+
+        # 4. Stdlib guess (broader extension → MIME map than MIME_TO_CATEGORY)
         guessed_mime, _ = mimetypes.guess_type(url)
         if guessed_mime:
             cat = MIME_TO_CATEGORY.get(guessed_mime)
             if cat and cat in self.enabled_categories:
                 return cat
 
+        # 5. No signal we can use
         return None
 
     def should_download(self, url: str, mime_type: Optional[str] = None) -> bool:
         """Check if a resource should be downloaded."""
         return self.get_category(url, mime_type) is not None
+
+    def should_consider(self, url: str) -> bool:
+        """Permissive prefilter: True unless the URL is *definitively* excluded.
+
+        Use this before dispatching to a HEAD-probing downloader so that URLs
+        without a recognizable path-level extension (image CDNs, Wayback
+        combiner URLs, etc.) still get a chance to be categorized via the
+        server's reported MIME. The downstream HEAD path calls
+        get_category(url, mime_type) which is the authoritative gate.
+        """
+        if not self.enabled_categories:
+            return False
+        parsed = urlparse(url)
+        path = parsed.path.rstrip("/")
+        if "." in path:
+            ext = path.rsplit(".", 1)[-1].lower()
+            if ext in self.ext_exclude:
+                return False
+        return True
 
     def is_page(self, url: str, mime_type: Optional[str] = None) -> bool:
         """Check if a URL points to a web page (for crawling)."""
