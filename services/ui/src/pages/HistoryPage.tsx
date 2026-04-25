@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import * as Dialog from '@radix-ui/react-dialog'
 import { jobs, type Job } from '@/api/client'
 import { useToast } from '@/components/Toaster'
+import { useJobStore } from '@/stores/jobStore'
 
 const statusConfig: Record<string, { icon: string; badge: string }> = {
   created: { icon: 'icon-[tabler--circle-dot]', badge: 'badge-neutral' },
@@ -68,12 +69,17 @@ export default function HistoryPage() {
 
   const queryClient = useQueryClient()
   const toast = useToast()
+  const setDraft = useJobStore((s) => s.setDraft)
+
+  // Clone is purely client-side: fetch the source job (gateway decrypts auth
+  // for us), stash the config + name in the draft slot, and route the user
+  // to /job/new. No DB row exists until they hit Start Scrape on the wizard.
   const cloneMutation = useMutation({
-    mutationFn: (id: string) => jobs.clone(id),
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['jobs'] })
-      toast.success('Job cloned', `Editing the new copy now`)
-      navigate(`/job/${result.job_id}`)
+    mutationFn: (id: string) => jobs.get(id),
+    onSuccess: (src) => {
+      const baseName = src.name?.trim() || `Job ${src.id.slice(0, 8)}`
+      setDraft(src.scrape_config, `${baseName} (copy)`)
+      navigate('/job/new')
     },
     onError: (e) => toast.error('Clone failed', e instanceof Error ? e.message : String(e)),
   })

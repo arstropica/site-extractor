@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { JobDetail, WSEvent } from '@/api/client'
+import type { JobDetail, ScrapeConfig, WSEvent } from '@/api/client'
 
 interface ScrapeEvent {
   type: string
@@ -18,6 +18,12 @@ interface JobStore {
   setCurrentStep: (step: number) => void
   completedSteps: Set<number>
   markStepCompleted: (step: number) => void
+
+  // Draft config used to prefill /job/new (e.g., from a "clone" click in
+  // history). Consumed and cleared by the wizard on mount.
+  draftConfig: ScrapeConfig | null
+  draftName: string | null
+  setDraft: (config: ScrapeConfig | null, name: string | null) => void
 
   // Real-time scrape events
   scrapeEvents: ScrapeEvent[]
@@ -45,6 +51,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
       next.add(step)
       return { completedSteps: next }
     }),
+
+  draftConfig: null,
+  draftName: null,
+  setDraft: (config, name) => set({ draftConfig: config, draftName: name }),
 
   scrapeEvents: [],
   addScrapeEvent: (event) =>
