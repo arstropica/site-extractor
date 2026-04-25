@@ -433,6 +433,12 @@ class Crawler:
                                 client, url, retry_limit=self._retry_limit,
                             )
                         if html is None:
+                            err = response_headers.get("_fetch_error") if response_headers else None
+                            if err:
+                                state.errors.append({"url": url, "error": err})
+                                await self._publish_event(self._job_id, "SCRAPE_ERROR", {
+                                    "url": url, "error": err,
+                                })
                             return
 
                     soup = BeautifulSoup(html, "lxml")
@@ -550,7 +556,11 @@ class Crawler:
 
     async def _fetch_with_retry(self, fetcher, url: str, retry_limit: int):
         """Run `fetcher()` with retry on transient failures (timeout, 5xx, network errors).
-        Returns (html, content_type, size, headers) or (None, None, 0, {}) on permanent failure.
+        Returns (html, content_type, size, headers) on success.
+        On permanent failure, returns (None, None, 0, {"_fetch_error": "..."}) so
+        callers can surface the cause as a SCRAPE_ERROR event instead of skipping
+        silently. Successful non-HTML responses (skipped because of content-type)
+        return (None, content_type, 0, headers) without _fetch_error.
         """
         attempts = max(1, retry_limit + 1)
         last_err = None
@@ -562,23 +572,26 @@ class Crawler:
                 if 500 <= e.response.status_code < 600 and i < attempts - 1:
                     last_err = e
                 else:
-                    logger.warning(f"Fetch failed for {url}: HTTP {e.response.status_code}")
-                    return None, None, 0, {}
+                    msg = f"HTTP {e.response.status_code}"
+                    logger.warning(f"Fetch failed for {url}: {msg}")
+                    return None, None, 0, {"_fetch_error": msg}
             except (httpx.TimeoutException, httpx.NetworkError, asyncio.TimeoutError) as e:
                 last_err = e
                 if i >= attempts - 1:
-                    logger.warning(f"Fetch failed for {url} after {attempts} attempts: {e}")
-                    return None, None, 0, {}
+                    msg = f"{type(e).__name__} after {attempts} attempts: {e}"
+                    logger.warning(f"Fetch failed for {url}: {msg}")
+                    return None, None, 0, {"_fetch_error": msg}
             except Exception as e:
                 # Non-transient (parsing, browser-level) — don't retry
-                logger.warning(f"Fetch failed for {url}: {e}")
-                return None, None, 0, {}
+                msg = f"{type(e).__name__}: {e}"
+                logger.warning(f"Fetch failed for {url}: {msg}")
+                return None, None, 0, {"_fetch_error": msg}
 
             # Exponential backoff before retry
             await asyncio.sleep((settings.SCRAPER_RETRY_BACKOFF_MS / 1000.0) * (2 ** i))
             logger.info(f"Retrying {url} (attempt {i + 2}/{attempts}) after {last_err}")
 
-        return None, None, 0, {}
+        return None, None, 0, {"_fetch_error": str(last_err) if last_err else "unknown"}
 
     async def _fetch_http(self, client: httpx.AsyncClient, url: str, retry_limit: int = 0):
         """Fetch a page via HTTP. Returns (html, content_type, size, headers)."""
@@ -603,7 +616,7 @@ class Crawler:
             try:
                 resp = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 if not resp:
-                    return None, None, 0, {}
+                    return None, None, 0, {"_fetch_error": "Browser navigation returned no response"}
                 try:
                     await page.wait_for_load_state("load", timeout=15000)
                 except Exception:
