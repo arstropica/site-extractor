@@ -43,7 +43,7 @@ cd site-extractor
 
 # Configure environment
 cp .env.example .env
-# Edit .env — at minimum set ENCRYPTION_KEY to a long random value
+# Edit .env — at minimum set ENCRYPTION_KEY (see below)
 
 # Start services
 docker compose up -d --build
@@ -54,6 +54,23 @@ curl http://localhost:12000/api/health | jq .
 # Open the UI
 open http://localhost:12000/
 ```
+
+#### Generating a secure `ENCRYPTION_KEY`
+
+The key can be any sufficiently random string — internally it is SHA-256 hashed to derive the Fernet key used for credential encryption at rest. Pick **one** of the following:
+
+```bash
+# OpenSSL (available everywhere)
+openssl rand -base64 48
+
+# Python stdlib
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+
+# Native Fernet key (also valid — it's just a random string)
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Paste the output into `.env` as `ENCRYPTION_KEY=<value>`. **Do not commit `.env`** — it is gitignored. **Do not change the key after creating jobs** — rotating it makes existing encrypted credentials undecryptable; the gateway will raise `CredentialDecryptError` and you will need to recreate the affected jobs.
 
 ### Quick Test (via API)
 
