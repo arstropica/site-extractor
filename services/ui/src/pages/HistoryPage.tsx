@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
+import * as Dialog from '@radix-ui/react-dialog'
 import { jobs, type Job } from '@/api/client'
 import { useToast } from '@/components/Toaster'
 
@@ -75,6 +76,21 @@ export default function HistoryPage() {
       navigate(`/job/${result.job_id}`)
     },
     onError: (e) => toast.error('Clone failed', e instanceof Error ? e.message : String(e)),
+  })
+
+  const [deleteTarget, setDeleteTarget] = useState<Job | null>(null)
+  const [keepDisk, setKeepDisk] = useState(true)
+  const deleteMutation = useMutation({
+    mutationFn: ({ id, keep }: { id: string; keep: boolean }) => jobs.delete(id, !keep),
+    onSuccess: (_result, vars) => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] })
+      toast.success(
+        'Job deleted',
+        vars.keep ? 'Disk results were kept.' : 'Disk results were removed.',
+      )
+      setDeleteTarget(null)
+    },
+    onError: (e) => toast.error('Delete failed', e instanceof Error ? e.message : String(e)),
   })
 
   const jobList = data?.jobs ?? []
@@ -264,6 +280,23 @@ export default function HistoryPage() {
                           >
                             <span className="icon-[tabler--copy] size-4" />
                           </button>
+                          <button
+                            className="btn btn-ghost btn-xs btn-square text-error/80 hover:text-error"
+                            title={
+                              job.status === 'scraping' || job.status === 'extracting'
+                                ? 'Cancel the job before deleting it'
+                                : 'Delete job'
+                            }
+                            disabled={
+                              job.status === 'scraping' || job.status === 'extracting'
+                            }
+                            onClick={() => {
+                              setKeepDisk(true)
+                              setDeleteTarget(job)
+                            }}
+                          >
+                            <span className="icon-[tabler--trash] size-4" />
+                          </button>
                           <span className="icon-[tabler--chevron-right] size-4 text-base-content/30" />
                         </div>
                       </td>
@@ -300,6 +333,72 @@ export default function HistoryPage() {
           </button>
         </div>
       )}
+
+      {/* Delete confirmation modal */}
+      <Dialog.Root
+        open={deleteTarget !== null}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-[60] bg-black/60 data-[state=open]:animate-in data-[state=open]:fade-in" />
+          <Dialog.Content className="fixed left-1/2 top-1/2 z-[70] w-[min(28rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-base-content/10 bg-base-100 p-6 shadow-2xl">
+            <Dialog.Title className="text-lg font-semibold">Delete this job?</Dialog.Title>
+            <Dialog.Description className="mt-2 text-sm text-base-content/60">
+              The job entry, indexed pages and resources, and Redis cache will be removed.
+              Choose what to do with the files on disk.
+            </Dialog.Description>
+
+            <div className="mt-4 space-y-2">
+              <label className="flex items-start gap-3 rounded-xl border border-base-content/10 p-3 cursor-pointer hover:bg-base-content/5">
+                <input
+                  type="radio"
+                  name="delete-mode"
+                  className="radio radio-sm mt-0.5"
+                  checked={keepDisk}
+                  onChange={() => setKeepDisk(true)}
+                />
+                <div className="flex-1">
+                  <div className="text-sm font-medium">Keep disk results</div>
+                  <div className="text-xs text-base-content/50 mt-0.5">
+                    Saved pages, assets, and extraction outputs stay in the data directory.
+                  </div>
+                </div>
+              </label>
+              <label className="flex items-start gap-3 rounded-xl border border-base-content/10 p-3 cursor-pointer hover:bg-base-content/5">
+                <input
+                  type="radio"
+                  name="delete-mode"
+                  className="radio radio-sm mt-0.5"
+                  checked={!keepDisk}
+                  onChange={() => setKeepDisk(false)}
+                />
+                <div className="flex-1">
+                  <div className="text-sm font-medium">Delete everything</div>
+                  <div className="text-xs text-base-content/50 mt-0.5">
+                    Also remove pages, assets, and extraction outputs from disk.
+                  </div>
+                </div>
+              </label>
+            </div>
+
+            <div className="mt-6 flex justify-end gap-2">
+              <Dialog.Close asChild>
+                <button className="btn btn-sm btn-ghost">Cancel</button>
+              </Dialog.Close>
+              <button
+                className="btn btn-sm btn-error"
+                disabled={deleteMutation.isPending}
+                onClick={() =>
+                  deleteTarget &&
+                  deleteMutation.mutate({ id: deleteTarget.id, keep: keepDisk })
+                }
+              >
+                {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </>
   )
 }

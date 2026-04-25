@@ -274,17 +274,32 @@ async def cancel_job(job_id: str, request: Request):
 
 
 @router.delete("/{job_id}")
-async def delete_job(job_id: str, delete_data: bool = Query(True)):
+async def delete_job(job_id: str, request: Request, delete_data: bool = Query(True)):
     job = await db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
     if job["status"] in ("scraping", "extracting"):
-        raise HTTPException(status_code=400, detail="Cannot delete a running job")
+        raise HTTPException(
+            status_code=400,
+            detail="Cancel the job before deleting it.",
+        )
 
-    # Delete files on disk
+    # Always wipe transient Redis state and the on-disk crawl_state metadata —
+    # the `delete_data` flag only governs the saved pages/assets/results.
+    await request.app.state.redis.delete(
+        f"scraper:pages:{job_id}",
+        f"scraper:resources:{job_id}",
+        f"scraper:result:{job_id}",
+        f"scraper:signal:{job_id}",
+    )
+
+    job_dir = Path(settings.DATA_DIR) / "jobs" / job_id
+    state_file = job_dir / "crawl_state.json"
+    if state_file.exists():
+        state_file.unlink(missing_ok=True)
+
     if delete_data:
-        job_dir = Path(settings.DATA_DIR) / "jobs" / job_id
         if job_dir.exists():
             shutil.rmtree(job_dir, ignore_errors=True)
 
