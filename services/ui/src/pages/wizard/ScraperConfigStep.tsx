@@ -302,8 +302,8 @@ export default function ScraperConfigStep({ onSubmit, initialConfig, initialName
         <div className="bg-base-200/50 rounded-xl p-4 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="form-control">
-              <label className="label"><span className="label-text text-xs">Depth Limit (hops)</span></label>
-              <input type="number" className="input input-bordered input-sm" min={1} max={20} value={depthLimit} onChange={(e) => setDepthLimit(parseInt(e.target.value) || 3)} />
+              <label className="label"><span className="label-text text-xs">Depth Limit (hops; 0 = seed URLs only)</span></label>
+              <input type="number" className="input input-bordered input-sm" min={0} max={20} value={depthLimit} onChange={(e) => { const v = parseInt(e.target.value); setDepthLimit(isNaN(v) ? 3 : v) }} />
             </div>
             <div className="form-control">
               <label className="label"><span className="label-text text-xs">Request Delay (ms)</span></label>
