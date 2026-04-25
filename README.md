@@ -45,6 +45,9 @@ cd site-extractor
 cp .env.example .env
 # Edit .env — at minimum set ENCRYPTION_KEY (see below)
 
+# Create the Docker network (one-time, idempotent)
+docker network create ${DOCKER_NETWORK:-extractor_network} 2>/dev/null || true
+
 # Start services
 docker compose up -d --build
 
@@ -265,7 +268,7 @@ All variables are read from the `.env` file at the project root (or the host env
 | Name                       | Description                                                                                                                                                                                                                                            | Default                          |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
 | `DOCKER_PORT`              | Host port published by `api-gateway`; UI + REST + WS are all served from this port.                                                                                                                                                                    | `12000`                          |
-| `DOCKER_NETWORK`           | Name of the Docker bridge network shared by all services.                                                                                                                                                                                              | `extractor_network`              |
+| `DOCKER_NETWORK`           | Name of the external Docker bridge network all services attach to. Declared `external: true` in compose, so create it once with `docker network create $DOCKER_NETWORK` (or reuse one from another stack to share networking).                         | `extractor_network`              |
 | `DATA_PATH`                | Host path bind-mounted to `/data` inside every service. Holds scraped pages, downloaded assets, and the SQLite database. Created on first run if it does not exist. Use an absolute path for clarity in production.                                    | `./data`                         |
 | `REDIS_URL`                | Redis connection URL used by every service for pub/sub and list-based sync.                                                                                                                                                                            | `redis://redis:6379`             |
 | `DATABASE_PATH`            | SQLite database file path inside the api-gateway container.                                                                                                                                                                                            | `/data/extractor.db`             |
