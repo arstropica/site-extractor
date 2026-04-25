@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import datetime
@@ -215,6 +216,7 @@ class Crawler:
 
         browser = None
         browser_context = None
+        pw = None
 
         try:
             if crawl_mode == "browser":
@@ -322,8 +324,41 @@ class Crawler:
                     return
 
         finally:
-            if browser:
-                await browser.close()
+            # Browser cleanup with bounded waits. If any step hangs (a wedged
+            # Playwright driver, a page that won't disconnect, etc.), we
+            # force-exit the process with code 75 so Docker's restart policy
+            # gives the next job a clean Playwright. Skipping cleanup is OK —
+            # the container is going away anyway.
+            cleanup_failed = False
+            for label, awaitable, timeout in (
+                ("browser_context", browser_context.close() if browser_context else None, 5.0),
+                ("browser", browser.close() if browser else None, 10.0),
+                ("playwright", pw.stop() if pw else None, 5.0),
+            ):
+                if awaitable is None:
+                    continue
+                try:
+                    await asyncio.wait_for(awaitable, timeout=timeout)
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"Job {job_id}: {label} cleanup timed out after {timeout}s; "
+                        "force-exiting so the container restarts with a fresh browser"
+                    )
+                    cleanup_failed = True
+                    break
+                except Exception as e:
+                    logger.warning(f"Job {job_id}: {label} cleanup raised {type(e).__name__}: {e}")
+            if cleanup_failed:
+                # Best-effort signal so the gateway sees the job as failed
+                # before we vanish — these awaits also get a short timeout.
+                try:
+                    await asyncio.wait_for(self._publish_event(job_id, "SCRAPE_STATUS", {
+                        "status": "failed",
+                        "error": "Browser cleanup hung; scraper container restarting.",
+                    }), timeout=2.0)
+                except Exception:
+                    pass
+                os._exit(75)  # EX_TEMPFAIL — Docker restart policy takes over
 
         # Save final state
         state.save(job_dir)
@@ -614,11 +649,26 @@ class Crawler:
         async def do_fetch():
             page = await context.new_page()
             try:
-                resp = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                # Outer asyncio.wait_for is a belt-and-suspenders watchdog in
+                # case Playwright's internal timeout doesn't fire (some pages
+                # wedge the driver subprocess). Slightly above the Playwright
+                # ceiling so the inner timeout error wins on the normal path.
+                try:
+                    resp = await asyncio.wait_for(
+                        page.goto(url, wait_until="domcontentloaded", timeout=60000),
+                        timeout=75.0,
+                    )
+                except asyncio.TimeoutError:
+                    return None, None, 0, {
+                        "_fetch_error": "Browser navigation hard-timeout (75s watchdog)"
+                    }
                 if not resp:
                     return None, None, 0, {"_fetch_error": "Browser navigation returned no response"}
                 try:
-                    await page.wait_for_load_state("load", timeout=15000)
+                    await asyncio.wait_for(
+                        page.wait_for_load_state("load", timeout=15000),
+                        timeout=20.0,
+                    )
                 except Exception:
                     pass
                 headers = dict(resp.headers)
@@ -626,7 +676,13 @@ class Crawler:
                 html = await page.content()
                 return html, content_type, len(html.encode()), headers
             finally:
-                await page.close()
+                # Bound page.close() too — it can hang if the page is wedged.
+                # Failure here only leaks one page; the bigger cleanup at end
+                # of crawl() will force-exit the worker if necessary.
+                try:
+                    await asyncio.wait_for(page.close(), timeout=5.0)
+                except Exception as e:
+                    logger.warning(f"page.close() failed for {url}: {e}")
         return await self._fetch_with_retry(do_fetch, url, retry_limit)
 
     async def _download_asset(self, client, url, job_id, storage, state, category, resource_filter):
