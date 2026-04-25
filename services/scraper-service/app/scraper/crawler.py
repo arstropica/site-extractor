@@ -438,6 +438,7 @@ class Crawler:
                 async with domain_sem:
                     await self._download_asset(
                         client, url, self._job_id, self._storage, state, url_category, resource_filter,
+                        referer=parent_url,
                     )
             await asyncio.sleep(self._delay_ms / 1000.0)
             return
@@ -581,6 +582,7 @@ class Crawler:
                             async with asset_sem:
                                 await self._download_asset(
                                     client, u, self._job_id, self._storage, state, c, resource_filter,
+                                    referer=url,
                                 )
                         asset_tasks.append(asyncio.create_task(_bounded()))
                     if asset_tasks:
@@ -693,6 +695,30 @@ class Crawler:
                 headers = dict(resp.headers)
                 content_type = resp.headers.get("content-type", "text/html")
                 html = await page.content()
+
+                # Sync session cookies that the site set during page load into
+                # the shared httpx client so subsequent asset downloads carry
+                # them. Some origins (Wayback's wb-*-SERVER affinity cookies,
+                # PHPSESSID, etc.) refuse or throttle requests that don't
+                # present an established session.
+                try:
+                    pw_cookies = await context.cookies()
+                    for c in pw_cookies:
+                        name = c.get("name")
+                        if not name:
+                            continue
+                        try:
+                            self._client.cookies.set(
+                                name,
+                                c.get("value", ""),
+                                domain=c.get("domain", "").lstrip("."),
+                                path=c.get("path", "/"),
+                            )
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.debug(f"Cookie sync from browser context failed: {e}")
+
                 return html, content_type, len(html.encode()), headers
             finally:
                 # Bound page.close() too — it can hang if the page is wedged.
@@ -704,7 +730,7 @@ class Crawler:
                     logger.warning(f"page.close() failed for {url}: {e}")
         return await self._fetch_with_retry(do_fetch, url, retry_limit)
 
-    async def _download_asset(self, client, url, job_id, storage, state, category, resource_filter):
+    async def _download_asset(self, client, url, job_id, storage, state, category, resource_filter, referer=None):
         """Public asset-download entry: handles retry-with-backoff for transient
         connection errors, then delegates to _download_asset_once.
 
@@ -712,13 +738,17 @@ class Crawler:
         connections in bursts but recover within seconds; without retries we
         lose any asset that happens to hit a throttled connection slot, even
         though the URL is fine.
+
+        `referer`, when set, is sent as the Referer header on HEAD/GET so
+        same-origin policies, hotlinking checks, and session-aware rate
+        limiters see a coherent browser-like request chain.
         """
         attempts = max(1, self._retry_limit + 1)
         last_err: Optional[Exception] = None
         for i in range(attempts):
             try:
                 await self._download_asset_once(
-                    client, url, job_id, storage, state, category, resource_filter,
+                    client, url, job_id, storage, state, category, resource_filter, referer,
                 )
                 return
             except (httpx.ConnectError, httpx.NetworkError, httpx.TimeoutException, asyncio.TimeoutError) as e:
@@ -742,7 +772,7 @@ class Crawler:
         except Exception:
             pass
 
-    async def _download_asset_once(self, client, url, job_id, storage, state, category, resource_filter):
+    async def _download_asset_once(self, client, url, job_id, storage, state, category, resource_filter, referer=None):
         """HEAD first → check size + verify category from server MIME → stream GET with abort guard.
 
         - HEAD: cheap probe of Content-Type and Content-Length. Re-categorize
@@ -759,11 +789,14 @@ class Crawler:
         max_asset = settings.MAX_ASSET_SIZE
         skip_size_check = False
         head_headers: Dict[str, Any] = {}
+        req_headers = {"Referer": referer} if referer else None
 
         try:
             # ── HEAD probe ────────────────────────────────────────────────
             try:
-                head = await client.head(url, timeout=10.0, follow_redirects=True)
+                head = await client.head(
+                    url, timeout=10.0, follow_redirects=True, headers=req_headers,
+                )
                 if head.status_code == 405:
                     # Server doesn't allow HEAD; we'll guard during stream
                     skip_size_check = True
@@ -856,7 +889,9 @@ class Crawler:
                 skip_size_check = True
 
             # ── Streaming GET with size guard ─────────────────────────────
-            async with client.stream("GET", url, follow_redirects=True) as resp:
+            async with client.stream(
+                "GET", url, follow_redirects=True, headers=req_headers,
+            ) as resp:
                 if resp.status_code != 200:
                     await self._publish_event(job_id, "SCRAPE_ERROR", {
                         "url": url,
