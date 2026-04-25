@@ -711,6 +711,10 @@ class Crawler:
                     # Server doesn't allow HEAD; we'll guard during stream
                     skip_size_check = True
                 elif head.status_code != 200:
+                    await self._publish_event(job_id, "SCRAPE_ERROR", {
+                        "url": url,
+                        "error": f"Asset HEAD returned HTTP {head.status_code}",
+                    })
                     return
                 else:
                     head_headers = dict(head.headers)
@@ -789,6 +793,10 @@ class Crawler:
             # ── Streaming GET with size guard ─────────────────────────────
             async with client.stream("GET", url, follow_redirects=True) as resp:
                 if resp.status_code != 200:
+                    await self._publish_event(job_id, "SCRAPE_ERROR", {
+                        "url": url,
+                        "error": f"Asset GET returned HTTP {resp.status_code}",
+                    })
                     return
 
                 resp_ct = resp.headers.get("content-type", "")
@@ -797,6 +805,10 @@ class Crawler:
 
                 if not skip_size_check and resp_len > max_asset:
                     logger.info(f"Skipping {url}: GET-declared size {resp_len} > MAX_ASSET_SIZE")
+                    await self._publish_event(job_id, "SCRAPE_ERROR", {
+                        "url": url,
+                        "error": f"Skipped — file too large ({resp_len} bytes)",
+                    })
                     return
 
                 # Re-verify category if HEAD was skipped
@@ -812,6 +824,10 @@ class Crawler:
                     total += len(chunk)
                     if total > max_asset:
                         logger.info(f"Aborting {url}: streamed bytes exceeded MAX_ASSET_SIZE")
+                        await self._publish_event(job_id, "SCRAPE_ERROR", {
+                            "url": url,
+                            "error": f"Aborted — streamed bytes exceeded MAX_ASSET_SIZE ({total} bytes)",
+                        })
                         return
                     chunks.append(chunk)
 
@@ -863,7 +879,15 @@ class Crawler:
             })
 
         except Exception as e:
-            logger.warning(f"Asset download failed for {url}: {e}")
+            msg = f"{type(e).__name__}: {e}"
+            logger.warning(f"Asset download failed for {url}: {msg}")
+            try:
+                await self._publish_event(job_id, "SCRAPE_ERROR", {
+                    "url": url,
+                    "error": f"Asset download failed: {msg}",
+                })
+            except Exception:
+                pass
 
     def _extract_links(self, html: str, base_url: str) -> list:
         """Extract all links from HTML content."""
