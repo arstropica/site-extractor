@@ -192,11 +192,15 @@ class Crawler:
                 state.queued_urls.append((url, 0, None))
                 state.pages_discovered += 1
 
-        # Set up HTTP client
+        # Set up HTTP client. http2=True negotiates HTTP/2 via ALPN where the
+        # origin supports it (most modern CDNs) and falls back to HTTP/1.1
+        # otherwise — matches what the headless browser does so our protocol
+        # version doesn't disagree with the Chrome User-Agent we advertise.
         proxy_url = settings.HTTPS_PROXY or settings.HTTP_PROXY or None
         client_kwargs = {
             "timeout": httpx.Timeout(30.0),
             "follow_redirects": True,
+            "http2": True,
             "headers": {"User-Agent": user_agent},
             "limits": httpx.Limits(max_connections=max_total, max_keepalive_connections=max_per_domain),
         }
