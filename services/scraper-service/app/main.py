@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
 
+from .clients.gateway import GatewayClient
 from .config import settings
 from .routes import scraper
 
@@ -28,11 +29,13 @@ logging.basicConfig(
 async def lifespan(app: FastAPI):
     # Startup
     app.state.redis = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    app.state.gateway_client = GatewayClient()
     app.state.active_crawls = {}  # job_id -> CrawlTask
     yield
     # Shutdown — cancel active crawls
     for job_id, task in app.state.active_crawls.items():
         task.cancel()
+    await app.state.gateway_client.close()
     await app.state.redis.close()
 
 

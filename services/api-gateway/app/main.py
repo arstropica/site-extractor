@@ -19,7 +19,7 @@ import redis.asyncio as redis
 
 from .config import settings
 from .database import db
-from .routes import jobs, schemas, scraper, extraction, pages, system
+from .routes import jobs, schemas, scraper, extraction, pages, system, internal
 from .services.websocket import ws_manager
 from .services.redis_consumer import RedisConsumer
 from .services.auto_resume import resume_orphaned_jobs
@@ -153,6 +153,7 @@ app.include_router(scraper.router, prefix="/api/scraper", tags=["Scraper"])
 app.include_router(extraction.router, prefix="/api/extraction", tags=["Extraction"])
 app.include_router(pages.router, prefix="/api/pages", tags=["Pages"])
 app.include_router(system.router, prefix="/api", tags=["System"])
+app.include_router(internal.router, prefix="/api/internal", tags=["Internal"])
 
 
 @app.websocket("/ws")

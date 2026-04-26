@@ -82,8 +82,12 @@ class CrawlState:
 class Crawler:
     """Main crawl engine supporting HTTP and browser modes."""
 
-    def __init__(self, redis_client, db_conn=None):
+    def __init__(self, redis_client, gateway_client=None, db_conn=None):
         self.redis = redis_client
+        # GatewayClient — page/resource/job-state writes go through here as
+        # HTTP POSTs to the api-gateway (the sole DB owner). The retry-with-
+        # backoff baked into the client provides at-least-once delivery.
+        self.gateway = gateway_client
         self.db = db_conn
         self._robot_parsers: Dict[str, Optional[RobotFileParser]] = {}
         self._domain_semaphores: Dict[str, asyncio.Semaphore] = {}
@@ -390,9 +394,10 @@ class Crawler:
                 "resources_downloaded": state.resources_downloaded,
                 "bytes_downloaded": state.bytes_downloaded,
             }
-            await self.redis.hset(f"scraper:result:{job_id}", mapping={
-                k: str(v) for k, v in completion_data.items()
-            })
+            # Direct UPDATE on the jobs row via the gateway, replacing the
+            # old scraper:result:* Redis hash + consumer _sync_result dance.
+            if self.gateway:
+                await self.gateway.mark_scraped(job_id, completion_data)
             await self._publish_event(job_id, "SCRAPE_STATUS", {
                 "status": "scraped",
                 **completion_data,
@@ -541,9 +546,8 @@ class Crawler:
                         "parent_url": parent_url,
                         "title": title,
                     }
-                    await self.redis.rpush(
-                        f"scraper:pages:{self._job_id}", json.dumps(page_record),
-                    )
+                    if self.gateway:
+                        await self.gateway.add_pages([page_record])
 
                     # Extract & queue links discovered from this page
                     if depth < self._depth_limit:
@@ -871,10 +875,8 @@ class Crawler:
                             "mime_type": head_ct,
                             "content_hash": content_hash,
                         }
-                        await self.redis.rpush(
-                            f"scraper:resources:{job_id}",
-                            json.dumps(resource_record),
-                        )
+                        if self.gateway:
+                            await self.gateway.add_resources([resource_record])
                         await self._publish_event(job_id, "RESOURCE_DOWNLOADED", {
                             "filename": resource_record["filename"],
                             "category": category,
@@ -972,10 +974,8 @@ class Crawler:
                 "mime_type": final_ct,
                 "content_hash": content_hash,
             }
-            await self.redis.rpush(
-                f"scraper:resources:{job_id}",
-                json.dumps(resource_record),
-            )
+            if self.gateway:
+                await self.gateway.add_resources([resource_record])
             await self._publish_event(job_id, "RESOURCE_DOWNLOADED", {
                 "filename": resource_record["filename"],
                 "category": category,

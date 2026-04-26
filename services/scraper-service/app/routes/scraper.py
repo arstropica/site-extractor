@@ -27,7 +27,10 @@ async def start_crawl(request: Request):
     if job_id in request.app.state.active_crawls:
         raise HTTPException(status_code=409, detail="Crawl already running for this job")
 
-    crawler = Crawler(redis_client=request.app.state.redis)
+    crawler = Crawler(
+        redis_client=request.app.state.redis,
+        gateway_client=request.app.state.gateway_client,
+    )
 
     # Fresh re-runs wipe Redis transient state and the on-disk crawl_state.json
     # so the seed loop fires and the crawler doesn't think it has nothing to do.
