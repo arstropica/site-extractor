@@ -52,6 +52,20 @@ BUILTIN_TEMPLATES = [
             {"name": "links", "field_type": "string", "is_array": True, "children": None},
         ],
     },
+    {
+        "name": "Video Scene",
+        "description": "Scene id, title, description, date, cover image, URL, performers, and additional images.",
+        "fields": [
+            { "name": "id", "field_type": "string", "is_array": False, "children": None },
+            { "name": "title", "field_type": "string", "is_array": False, "children": None },
+            { "name": "details", "field_type": "string", "is_array": False, "children": None },
+            { "name": "date", "field_type": "string", "is_array": False, "children": None },
+            { "name": "cover_image", "field_type": "string", "is_array": False, "children": None },
+            { "name": "url", "field_type": "string", "is_array": False, "children": None },
+            { "name": "performers", "field_type": "string", "is_array": True, "children": None },
+            { "name": "images", "field_type": "string", "is_array": True, "children": None }
+        ],
+    },
 ]
 
 
