@@ -579,10 +579,27 @@ class Crawler:
                     asset_urls = self._extract_assets(html, url)
                     asset_tasks = []
                     asset_sem = asyncio.Semaphore(self._max_total)
+                    # Track which embedded-asset URLs we've already considered
+                    # for THIS page so duplicate references inside one page
+                    # (e.g. the same logo in multiple sprites) only count
+                    # once toward resources_discovered.
+                    seen_for_page: set[str] = set()
                     for asset_url in asset_urls:
+                        if asset_url in seen_for_page:
+                            continue
+                        seen_for_page.add(asset_url)
                         if not resource_filter.should_consider(asset_url):
                             continue
                         category_hint = resource_filter.get_category(asset_url)
+
+                        # Embedded assets are dispatched directly (not queued
+                        # through the link-discovery path), so the
+                        # resources_discovered counter has to be bumped here
+                        # to keep the discovered/downloaded tallies coherent
+                        # in the wizard counters and the final mark_scraped
+                        # payload. Without this the UI shows e.g. 2146/0.
+                        async with self._state_lock:
+                            state.resources_discovered += 1
 
                         async def _bounded(u=asset_url, c=category_hint):
                             async with asset_sem:
