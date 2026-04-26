@@ -99,7 +99,7 @@ export const pages = {
     return request<{ resources: ScrapeResource[]; count: number }>(`/pages/${jobId}/resources${qs}`)
   },
   viewUrl: (jobId: string, pageId: string) => `${BASE}/pages/${jobId}/view/${pageId}`,
-  assetUrl: (jobId: string, resourcePath: string) => `${BASE}/pages/${jobId}/asset/${resourcePath}`,
+  assetUrl: (jobId: string, resourcePath: string) => `${BASE}/pages/${jobId}/assets/${resourcePath}`,
   tree: (jobId: string) => request<{ tree: Record<string, PageTreeNode>; count: number }>(`/pages/${jobId}/tree`),
 }
 

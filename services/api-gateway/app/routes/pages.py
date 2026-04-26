@@ -68,9 +68,20 @@ async def view_page(job_id: str, page_id: str):
     return FileResponse(file_path, media_type=content_type)
 
 
-@router.get("/{job_id}/asset/{resource_path:path}")
+@router.get("/{job_id}/assets/{resource_path:path}")
 async def serve_asset(job_id: str, resource_path: str):
-    """Serve a scraped asset (image, CSS, etc.) referenced by a stored page."""
+    """Serve a scraped asset (image, CSS, etc.) referenced by a stored page.
+
+    Path is `assets` (plural) to match what page_storage.save_page() writes
+    when it rewrites img/link/source URLs in the saved HTML — the rewrite
+    produces `../assets/<filename>`, which the iframe-served page resolves
+    to `/api/pages/<job_id>/assets/<filename>` relative to the view route.
+    """
+    # Saved HTML rewrites are bare filenames living under <jobdir>/assets/,
+    # but accept either form so a request like /assets/assets/foo.png also
+    # resolves cleanly.
+    if not resource_path.startswith("assets/"):
+        resource_path = f"assets/{resource_path}"
     asset_path = Path(settings.DATA_DIR) / "jobs" / job_id / resource_path
 
     # Prevent directory traversal
