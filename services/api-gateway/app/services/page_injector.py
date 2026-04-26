@@ -12,6 +12,7 @@ PICKER_SCRIPT = """
 (function() {
   var overlay = null;
   var highlights = [];
+  var highlightSeq = 0;
   var pickerActive = false;
 
   function createOverlay() {
@@ -92,6 +93,8 @@ PICKER_SCRIPT = """
 
   function highlightMatches(selector) {
     clearHighlights();
+    highlightSeq++;
+    var thisSeq = highlightSeq;
     try {
       var els = document.querySelectorAll(selector);
       els.forEach(function(el) {
@@ -101,11 +104,24 @@ PICKER_SCRIPT = """
         h.style.cssText =
           'position:fixed;pointer-events:none;z-index:2147483646;' +
           'border:2px solid #10b981;background:rgba(16,185,129,0.15);' +
+          'transition:opacity 0.4s ease;' +
           'left:' + r.left + 'px;top:' + r.top + 'px;' +
           'width:' + r.width + 'px;height:' + r.height + 'px;';
         document.body.appendChild(h);
         highlights.push(h);
       });
+      // Auto-fade after a brief view window so highlights don't persist
+      // as zombies on the page after the pick is done. The seq check
+      // ensures a newer call doesn't get pre-empted by an older timer.
+      if (els.length > 0) {
+        setTimeout(function() {
+          if (highlightSeq !== thisSeq) return;
+          highlights.forEach(function(h) { h.style.opacity = '0'; });
+          setTimeout(function() {
+            if (highlightSeq === thisSeq) clearHighlights();
+          }, 450);
+        }, 2500);
+      }
       return els.length;
     } catch(e) {
       return 0;
@@ -128,6 +144,10 @@ PICKER_SCRIPT = """
       pickerActive = false;
       document.body.style.cursor = '';
       hideOverlay();
+      // Belt-and-suspenders: if the user toggles the Pick button off
+      // without actually clicking an element, kill any leftover green
+      // highlights from a previous selection too.
+      clearHighlights();
     }
     else if (msg.type === 'HIGHLIGHT_SELECTOR') {
       var count = highlightMatches(msg.selector || '');
