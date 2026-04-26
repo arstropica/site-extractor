@@ -5,6 +5,8 @@ import uuid
 import logging
 from datetime import datetime
 from pathlib import Path
+
+import httpx
 from fastapi import APIRouter, Request, HTTPException
 
 from ..config import settings
@@ -170,48 +172,45 @@ async def validate_selector(request: Request):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def _load_pages(redis_client, job_id: str) -> list:
-    """Load page index from the API gateway's database via Redis cache or file."""
-    # The API gateway stores a page index in the job directory
-    index_path = Path(settings.DATA_DIR) / "jobs" / job_id / "page_index.json"
-    if index_path.exists():
-        return json.loads(index_path.read_text())
+    """Load the canonical page list from the gateway DB.
 
-    # Fallback: scan the pages directory
-    pages_dir = Path(settings.DATA_DIR) / "jobs" / job_id / "pages"
-    if not pages_dir.exists():
-        return []
-
-    pages = []
-    for f in sorted(pages_dir.iterdir()):
-        if f.is_file() and f.suffix in (".html", ".htm"):
-            pages.append({
-                "url": f.stem.replace("_", "/"),
-                "local_path": f"pages/{f.name}",
-                "status": "downloaded",
-            })
-    return pages
+    SQLite (via the gateway) is the source of truth — the scraper writes
+    each page record there as it captures it. Disk only holds the HTML
+    blobs that records reference. We pull paginated until exhausted so
+    large jobs don't truncate at the default page-size cap.
+    """
+    return await _fetch_paginated(f"/api/pages/{job_id}", "pages")
 
 
 async def _load_resources(redis_client, job_id: str) -> list:
-    """Load resource index."""
-    index_path = Path(settings.DATA_DIR) / "jobs" / job_id / "resource_index.json"
-    if index_path.exists():
-        return json.loads(index_path.read_text())
+    """Load the canonical resource list from the gateway DB."""
+    return await _fetch_paginated(f"/api/pages/{job_id}/resources", "resources")
 
-    assets_dir = Path(settings.DATA_DIR) / "jobs" / job_id / "assets"
-    if not assets_dir.exists():
-        return []
 
-    resources = []
-    for f in sorted(assets_dir.iterdir()):
-        if f.is_file():
-            resources.append({
-                "filename": f.name,
-                "local_path": f"assets/{f.name}",
-                "size": f.stat().st_size,
-                "url": "",
-            })
-    return resources
+async def _fetch_paginated(path: str, field: str, page_size: int = 1000) -> list:
+    """GET /api/.../<list-endpoint> with offset/limit until exhausted.
+
+    The gateway caps the per-call limit at 1000; we loop until the returned
+    chunk is shorter than that, accumulating into a single list. Tiny perf
+    cost, but it keeps callers from accidentally truncating at >1000-record
+    jobs.
+    """
+    out = []
+    offset = 0
+    base_url = settings.GATEWAY_URL.rstrip("/")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while True:
+            resp = await client.get(
+                f"{base_url}{path}",
+                params={"limit": page_size, "offset": offset},
+            )
+            resp.raise_for_status()
+            chunk = resp.json().get(field, [])
+            out.extend(chunk)
+            if len(chunk) < page_size:
+                break
+            offset += page_size
+    return out
 
 
 async def _publish(redis_client, job_id: str, event_type: str, data: dict):
