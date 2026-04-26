@@ -38,42 +38,70 @@ class RedisConsumer:
 
     async def _consume_loop(self):
         """Main loop: drain Redis lists and sync to SQLite."""
+        cycles = 0
         while self._running:
             try:
-                drained = await self._drain_all()
-                # Sleep longer if nothing was drained
+                # Hard ceiling per cycle. Without this, a slow DB write or a
+                # wedged Redis read could keep one drain from ever returning,
+                # leaving subsequent jobs untouched.
+                drained = await asyncio.wait_for(self._drain_all(), timeout=60.0)
+                cycles += 1
+                # Heartbeat every ~60s of idle so we can confirm liveness from logs
+                if cycles % 30 == 0:
+                    logger.info(f"Redis consumer alive (cycle {cycles}, drained_this_cycle={drained})")
                 await asyncio.sleep(0.5 if drained else 2.0)
             except asyncio.CancelledError:
                 break
+            except asyncio.TimeoutError:
+                logger.error("Redis consumer cycle exceeded 60s; aborting and retrying")
+                await asyncio.sleep(2.0)
             except Exception as e:
-                logger.error(f"Redis consumer error: {e}")
+                logger.error(f"Redis consumer error: {e!r}", exc_info=True)
                 await asyncio.sleep(5.0)
 
+    async def _scan_keys(self, pattern: str) -> list:
+        """Use SCAN instead of KEYS so a key set with many entries doesn't
+        block the Redis server. Returns a list of matching keys."""
+        keys = []
+        async for k in self.redis.scan_iter(match=pattern, count=200):
+            keys.append(k)
+        return keys
+
     async def _drain_all(self) -> bool:
-        """Drain all known scraper lists. Returns True if anything was processed."""
+        """Drain all known scraper lists. Returns True if anything was processed.
+
+        Each per-job drain is isolated in its own try/except so one bad job
+        (malformed record, transient DB error, etc.) cannot abort the entire
+        cycle and starve other jobs."""
         drained = False
 
-        # Find all active page/resource lists
-        page_keys = await self.redis.keys("scraper:pages:*")
-        for key in page_keys:
+        for key in await self._scan_keys("scraper:pages:*"):
             job_id = key.split(":")[-1]
-            count = await self._drain_pages(job_id)
-            if count > 0:
-                drained = True
+            try:
+                count = await self._drain_pages(job_id)
+                if count > 0:
+                    drained = True
+                    logger.info(f"Drained {count} page record(s) for job {job_id}")
+            except Exception as e:
+                logger.error(f"Failed draining pages for job {job_id}: {e!r}", exc_info=True)
 
-        resource_keys = await self.redis.keys("scraper:resources:*")
-        for key in resource_keys:
+        for key in await self._scan_keys("scraper:resources:*"):
             job_id = key.split(":")[-1]
-            count = await self._drain_resources(job_id)
-            if count > 0:
-                drained = True
+            try:
+                count = await self._drain_resources(job_id)
+                if count > 0:
+                    drained = True
+                    logger.info(f"Drained {count} resource record(s) for job {job_id}")
+            except Exception as e:
+                logger.error(f"Failed draining resources for job {job_id}: {e!r}", exc_info=True)
 
-        # Check for completed scraper results
-        result_keys = await self.redis.keys("scraper:result:*")
-        for key in result_keys:
+        for key in await self._scan_keys("scraper:result:*"):
             job_id = key.split(":")[-1]
-            await self._sync_result(job_id)
-            drained = True
+            try:
+                await self._sync_result(job_id)
+                drained = True
+            except Exception as e:
+                logger.error(f"Failed syncing result for job {job_id}: {e!r}", exc_info=True)
 
         return drained
 

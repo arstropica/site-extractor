@@ -25,6 +25,15 @@ from .services.redis_consumer import RedisConsumer
 from .services.auto_resume import resume_orphaned_jobs
 from .services.seed_templates import seed_templates
 
+# Without this, logger.info(...) calls from our app modules are silently
+# dropped — uvicorn only configures its own loggers, not Python's root,
+# so we have no visibility into the redis_consumer or any other internal
+# state. Set INFO so consumer drain activity, errors, and heartbeats show.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,7 +41,20 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     await db.connect()
-    app.state.redis = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    # socket_timeout prevents an await on a half-open Redis connection from
+    # hanging forever (which silently wedged the consumer in production —
+    # pages stayed in the queue, no exception ever fired to trigger retry).
+    # health_check_interval keeps connections fresh; retry_on_timeout makes
+    # transient blips self-recover instead of needing a service restart.
+    app.state.redis = redis.from_url(
+        settings.REDIS_URL,
+        decode_responses=True,
+        socket_timeout=10.0,
+        socket_connect_timeout=5.0,
+        socket_keepalive=True,
+        health_check_interval=30,
+        retry_on_timeout=True,
+    )
     app.state.ws_manager = ws_manager
 
     # Start Redis consumer (scraper → SQLite sync)
