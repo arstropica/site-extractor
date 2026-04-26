@@ -12,10 +12,13 @@ hit /internal. If we ever need real isolation, easy to add a shared
 header secret or split the FastAPI app onto a second port.
 """
 
+import logging
 from datetime import datetime
 from fastapi import APIRouter, Request
 
 from ..database import db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -40,7 +43,6 @@ async def add_pages(request: Request):
                 job_ids.add(p["job_id"])
         except Exception as e:
             # Log but don't fail the whole batch — record skipped, others proceed
-            from ..services.redis_consumer import logger
             logger.error(f"add_scrape_page failed for {p.get('id')}: {e!r}")
 
     # Counter recompute per job touched
@@ -68,7 +70,6 @@ async def add_resources(request: Request):
             if r.get("job_id"):
                 job_ids.add(r["job_id"])
         except Exception as e:
-            from ..services.redis_consumer import logger
             logger.error(f"add_scrape_resource failed for {r.get('id')}: {e!r}")
 
     for jid in job_ids:

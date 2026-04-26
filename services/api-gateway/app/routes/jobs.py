@@ -209,16 +209,11 @@ async def start_scrape(job_id: str, request: Request):
     # re-downloading unchanged content from disk.
     is_resume = job["status"] == "paused"
     if not is_resume:
-        # Order matters: drop the Redis lists FIRST so the redis_consumer
-        # can't drain stale records back into scrape_pages/scrape_resources
-        # during the brief window between the DB wipe and the scraper's own
-        # cleanup_for_fresh_run().
-        await request.app.state.redis.delete(
-            f"scraper:pages:{job_id}",
-            f"scraper:resources:{job_id}",
-            f"scraper:result:{job_id}",
-            f"scraper:signal:{job_id}",
-        )
+        # Wipe any leftover pause/cancel signal from a prior run, then
+        # clear stale page/resource rows so they don't accumulate. The
+        # scraper's per-URL HEAD freshness check still avoids re-
+        # downloading unchanged content from disk.
+        await request.app.state.redis.delete(f"scraper:signal:{job_id}")
         await db.clear_scrape_data(job_id)
 
     # Decrypt sensitive auth fields before forwarding (scraper sees plaintext only)
@@ -303,14 +298,9 @@ async def delete_job(job_id: str, request: Request, delete_data: bool = Query(Tr
             detail="Cancel the job before deleting it.",
         )
 
-    # Always wipe transient Redis state and the on-disk crawl_state metadata —
+    # Wipe any pause/cancel signal and the on-disk crawl_state metadata —
     # the `delete_data` flag only governs the saved pages/assets/results.
-    await request.app.state.redis.delete(
-        f"scraper:pages:{job_id}",
-        f"scraper:resources:{job_id}",
-        f"scraper:result:{job_id}",
-        f"scraper:signal:{job_id}",
-    )
+    await request.app.state.redis.delete(f"scraper:signal:{job_id}")
 
     job_dir = Path(settings.DATA_DIR) / "jobs" / job_id
     state_file = job_dir / "crawl_state.json"

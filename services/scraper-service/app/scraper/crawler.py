@@ -136,17 +136,15 @@ class Crawler:
         return False
 
     async def cleanup_for_fresh_run(self, job_id: str):
-        """Wipe Redis transient state and on-disk crawl_state.json for a fresh re-run.
+        """Clear pause/cancel signal + on-disk crawl_state.json for a fresh re-run.
 
-        Leaves saved pages/, assets/, results/ on disk — those are verified
-        per-URL via HEAD freshness during the new crawl.
+        Page and resource records live in SQLite (written via the gateway's
+        /api/internal/* endpoints) and are cleared by the gateway's
+        clear_scrape_data() before this method runs. Saved pages/, assets/,
+        results/ stay on disk — they're verified per-URL via HEAD freshness
+        during the new crawl.
         """
-        await self.redis.delete(
-            f"scraper:pages:{job_id}",
-            f"scraper:resources:{job_id}",
-            f"scraper:result:{job_id}",
-            f"scraper:signal:{job_id}",
-        )
+        await self.redis.delete(f"scraper:signal:{job_id}")
         state_file = Path(settings.DATA_DIR) / "jobs" / job_id / "crawl_state.json"
         if state_file.exists():
             try:

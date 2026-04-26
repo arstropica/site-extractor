@@ -1,12 +1,10 @@
 """Scraped page serving routes — proxies stored pages for the mapping UI iframe."""
 
-import hashlib
-import json
 import logging
 from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, Response
 
 from ..database import db
 from ..config import settings
@@ -17,55 +15,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _disk_id_for_filename(filename: str) -> str:
-    """Stable id for a disk-only page record (md5 of filename).
-
-    Pages that never landed in SQLite (consumer drain hiccup, race during
-    re-scrape, etc.) need a stable id we can echo back to /view/<id> later.
-    md5 is good enough — non-cryptographic, just a deterministic mapping.
-    """
-    return hashlib.md5(filename.encode()).hexdigest()
-
-
-def _scan_disk_pages(job_id: str) -> list:
-    """Enumerate pages from <job>/pages on disk, reading freshness sidecars.
-
-    Returns the same record shape as db.list_scrape_pages() so the two can
-    be union'd. Disk is the source of truth — extraction reads from here —
-    so the API listing must include anything found here even if SQLite
-    didn't get the matching record.
-    """
-    pages_dir = Path(settings.DATA_DIR) / "jobs" / job_id / "pages"
-    if not pages_dir.is_dir():
-        return []
-    out = []
-    for f in sorted(pages_dir.iterdir()):
-        if not f.is_file():
-            continue
-        if f.suffix not in (".html", ".htm"):
-            continue
-        meta = {}
-        meta_path = f.with_suffix(f.suffix + ".meta.json")
-        if meta_path.is_file():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        out.append({
-            "id": _disk_id_for_filename(f.name),
-            "job_id": job_id,
-            "url": meta.get("url", ""),
-            "local_path": f"pages/{f.name}",
-            "status": "downloaded",
-            "content_type": meta.get("content_type"),
-            "size": f.stat().st_size,
-            "depth": 0,
-            "parent_url": None,
-            "title": meta.get("title"),
-        })
-    return out
-
-
 @router.get("/{job_id}")
 async def list_pages(
     job_id: str,
@@ -73,26 +22,13 @@ async def list_pages(
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
-    """List scraped pages for a job, unioned with on-disk pages.
-
-    SQLite is populated from Redis by the consumer — if any drain cycle
-    silently drops records (which the user has hit), the dropdown
-    listing was missing pages even though the files were on disk and
-    the extraction service was happily using them. Backfill from disk
-    so the API listing always matches what extraction sees.
-    """
-    db_pages = await db.list_scrape_pages(job_id, status=status, limit=limit, offset=offset)
-    db_count = await db.count_scrape_pages(job_id, status=status)
-
-    db_local_paths = {p.get("local_path") for p in db_pages if p.get("local_path")}
-    disk_pages = _scan_disk_pages(job_id)
-    backfill = [p for p in disk_pages if p["local_path"] not in db_local_paths]
-    if backfill:
-        logger.warning(
-            f"Job {job_id}: backfilling {len(backfill)} page(s) from disk that "
-            f"are missing from SQLite (consumer drain may have dropped them)"
-        )
-    return {"pages": db_pages + backfill, "count": db_count + len(backfill)}
+    """List scraped pages for a job. SQLite is the source of truth — the
+    scraper writes records via /api/internal/pages, the gateway INSERTs
+    them, and this endpoint reads them back. Disk holds the HTML blobs
+    that records reference; it is not consulted to construct the list."""
+    pages = await db.list_scrape_pages(job_id, status=status, limit=limit, offset=offset)
+    count = await db.count_scrape_pages(job_id, status=status)
+    return {"pages": pages, "count": count}
 
 
 @router.get("/{job_id}/resources")
@@ -116,22 +52,6 @@ async def view_page(job_id: str, page_id: str):
 
     pages = await db.list_scrape_pages(job_id, limit=1000)
     page = next((p for p in pages if p["id"] == page_id), None)
-
-    if not page:
-        # The dropdown may have been served a disk-id (md5(filename)) for a
-        # page that never made it into SQLite — try resolving that.
-        pages_dir = Path(settings.DATA_DIR) / "jobs" / job_id / "pages"
-        if pages_dir.is_dir():
-            for f in pages_dir.iterdir():
-                if not f.is_file() or f.suffix not in (".html", ".htm"):
-                    continue
-                if _disk_id_for_filename(f.name) == page_id:
-                    page = {
-                        "local_path": f"pages/{f.name}",
-                        "content_type": "text/html",
-                    }
-                    break
-
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
 
@@ -163,9 +83,6 @@ async def serve_asset(job_id: str, resource_path: str):
     produces `../assets/<filename>`, which the iframe-served page resolves
     to `/api/pages/<job_id>/assets/<filename>` relative to the view route.
     """
-    # Saved HTML rewrites are bare filenames living under <jobdir>/assets/,
-    # but accept either form so a request like /assets/assets/foo.png also
-    # resolves cleanly.
     if not resource_path.startswith("assets/"):
         resource_path = f"assets/{resource_path}"
     asset_path = Path(settings.DATA_DIR) / "jobs" / job_id / resource_path

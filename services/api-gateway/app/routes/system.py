@@ -42,18 +42,3 @@ async def health(request: Request):
 
     overall = "healthy" if all(v == "healthy" for v in services.values()) else "degraded"
     return {"status": overall, "services": services, "version": "0.1.0"}
-
-
-@router.post("/system/drain-redis")
-async def force_drain(request: Request):
-    """Manually trigger one drain cycle of the Redis consumer.
-
-    Useful when a previous consumer cycle wedged and pages/resources are
-    sitting in Redis lists that haven't been moved into SQLite. Returns
-    whether anything was drained on this cycle.
-    """
-    consumer = getattr(request.app.state, "redis_consumer", None)
-    if not consumer:
-        return {"error": "consumer not initialized"}
-    drained = await consumer._drain_all()
-    return {"drained": drained}

@@ -21,14 +21,13 @@ from .config import settings
 from .database import db
 from .routes import jobs, schemas, scraper, extraction, pages, system, internal
 from .services.websocket import ws_manager
-from .services.redis_consumer import RedisConsumer
 from .services.auto_resume import resume_orphaned_jobs
 from .services.seed_templates import seed_templates
 
 # Without this, logger.info(...) calls from our app modules are silently
 # dropped — uvicorn only configures its own loggers, not Python's root,
-# so we have no visibility into the redis_consumer or any other internal
-# state. Set INFO so consumer drain activity, errors, and heartbeats show.
+# so we have no visibility into application internals. Set INFO so
+# request-level logs, errors, and warnings show up in container output.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -56,11 +55,6 @@ async def lifespan(app: FastAPI):
         retry_on_timeout=True,
     )
     app.state.ws_manager = ws_manager
-
-    # Start Redis consumer (scraper → SQLite sync)
-    consumer = RedisConsumer(app.state.redis, db)
-    await consumer.start()
-    app.state.redis_consumer = consumer
 
     # Start Redis subscriber for scraper/extraction events → WebSocket relay
     app.state.redis_sub = redis.from_url(settings.REDIS_URL, decode_responses=True)
@@ -124,7 +118,6 @@ async def lifespan(app: FastAPI):
     app.state.relay_task.cancel()
     if hasattr(app.state, "resume_task"):
         app.state.resume_task.cancel()
-    await consumer.stop()
     await pubsub.unsubscribe("scraper_events", "extraction_events")
     await app.state.redis_sub.close()
     await db.close()
