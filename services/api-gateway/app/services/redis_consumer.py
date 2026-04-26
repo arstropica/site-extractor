@@ -98,8 +98,12 @@ class RedisConsumer:
         for key in await self._scan_keys("scraper:result:*"):
             job_id = key.split(":")[-1]
             try:
-                await self._sync_result(job_id)
-                drained = True
+                # Only count as drained if the call actually did something —
+                # otherwise an orphan result key would keep flipping
+                # drained_this_cycle=True every cycle forever.
+                synced = await self._sync_result(job_id)
+                if synced:
+                    drained = True
             except Exception as e:
                 logger.error(f"Failed syncing result for job {job_id}: {e!r}", exc_info=True)
 
@@ -154,21 +158,27 @@ class RedisConsumer:
 
         return count
 
-    async def _sync_result(self, job_id: str) -> None:
-        """Sync scraper completion result to job record."""
+    async def _sync_result(self, job_id: str) -> bool:
+        """Sync scraper completion result to job record. Returns True if any
+        meaningful work was done (key removed and/or DB updated)."""
         result = await self.redis.hgetall(f"scraper:result:{job_id}")
         if not result:
-            return
+            return False
 
         job = await self.db.get_job(job_id)
         if not job:
-            return
+            # Orphan: result hash for a job that no longer exists in the DB
+            # (deleted while still scraping, manual wipe, etc.). Without this
+            # delete, the key sits in Redis forever and the loop keeps trying.
+            await self.redis.delete(f"scraper:result:{job_id}")
+            logger.info(f"Removed orphan result key for missing job {job_id}")
+            return True
 
         # Only update if the job is still in a scraping state
         if job["status"] not in ("scraping", "paused"):
             # Clean up the result key
             await self.redis.delete(f"scraper:result:{job_id}")
-            return
+            return True
 
         updates = {
             "status": "scraped",
@@ -187,3 +197,4 @@ class RedisConsumer:
             f"Job {job_id} marked as scraped: "
             f"{updates['pages_downloaded']} pages, {updates['resources_downloaded']} resources"
         )
+        return True

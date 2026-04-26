@@ -5,6 +5,7 @@ Handles HTTP and browser-based web crawling with real-time progress
 updates via Redis pub/sub.
 """
 
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,15 @@ import redis.asyncio as redis
 
 from .config import settings
 from .routes import scraper
+
+# Without this, every logger.info/warning/error from the crawler module
+# (page saves, fetch retries, asset failures, SCRAPE_ERROR causes, etc.)
+# is silently dropped — uvicorn only configures its own loggers, leaving
+# the rest of the app invisible to anyone tailing the container logs.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 
 @asynccontextmanager
