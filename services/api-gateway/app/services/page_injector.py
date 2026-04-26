@@ -120,6 +120,9 @@ PICKER_SCRIPT = """
     if (msg.type === 'PICKER_ENABLE') {
       pickerActive = true;
       document.body.style.cursor = 'crosshair';
+      // Clear leftover match highlights from a previous pick so the new
+      // session starts visually clean.
+      clearHighlights();
     }
     else if (msg.type === 'PICKER_DISABLE') {
       pickerActive = false;
@@ -164,6 +167,14 @@ PICKER_SCRIPT = """
     if (e.target.src) attrs.src = e.target.src;
     if (e.target.href) attrs.href = e.target.href;
     if (e.target.alt) attrs.alt = e.target.alt;
+
+    // Tear the picker down locally before the parent round-trip so the
+    // blue hover overlay doesn't sit on the just-clicked element while we
+    // wait for the parent's PICKER_DISABLE to come back. The parent will
+    // also send PICKER_DISABLE — the duplicate is harmless.
+    pickerActive = false;
+    document.body.style.cursor = '';
+    hideOverlay();
 
     window.parent.postMessage({
       type: 'ELEMENT_SELECTED',
