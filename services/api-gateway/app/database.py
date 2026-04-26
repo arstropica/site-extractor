@@ -14,8 +14,17 @@ class Database:
         self._db: Optional[aiosqlite.Connection] = None
 
     async def connect(self):
-        self._db = await aiosqlite.connect(self.path)
+        # 30s busy timeout (default 5s was not enough under combined
+        # UI-polling + consumer-drain pressure on small VMs — drain
+        # writes were timing out and losing records).
+        self._db = await aiosqlite.connect(self.path, timeout=30.0)
         self._db.row_factory = aiosqlite.Row
+        # WAL mode so concurrent reads (UI polling) don't block writer
+        # transactions (consumer drain). NORMAL synchronous is the
+        # WAL-recommended default.
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA synchronous=NORMAL")
+        await self._db.execute("PRAGMA busy_timeout=30000")
         await self._create_tables()
 
     async def close(self):

@@ -110,7 +110,15 @@ class RedisConsumer:
         return drained
 
     async def _drain_pages(self, job_id: str) -> int:
-        """Drain page records from Redis list into SQLite."""
+        """Drain page records from Redis list into SQLite.
+
+        At-least-once semantics: on INSERT failure (DB lock, malformed
+        record, etc.) we RPUSH the raw record back onto the queue so
+        the next cycle can retry. INSERT OR IGNORE in add_scrape_page
+        makes accidental duplicates a no-op. Without this, an LPOP'd
+        record whose INSERT raised was silently dropped — invisible
+        record loss between Redis and SQLite.
+        """
         count = 0
         while True:
             raw = await self.redis.lpop(f"scraper:pages:{job_id}")
@@ -121,7 +129,19 @@ class RedisConsumer:
                 await self.db.add_scrape_page(page)
                 count += 1
             except Exception as e:
-                logger.warning(f"Failed to persist page record: {e}")
+                logger.error(
+                    f"add_scrape_page failed for job {job_id} ({type(e).__name__}: {e}); "
+                    "requeuing for retry"
+                )
+                try:
+                    await self.redis.rpush(f"scraper:pages:{job_id}", raw)
+                except Exception as ex2:
+                    logger.error(
+                        f"Requeue also failed for job {job_id}: {ex2!r}; record lost: {raw[:200]}"
+                    )
+                # Stop draining this list this cycle to avoid hot-looping
+                # on a persistent error; next cycle starts fresh.
+                break
 
         if count > 0:
             # Update job counters
@@ -135,7 +155,11 @@ class RedisConsumer:
         return count
 
     async def _drain_resources(self, job_id: str) -> int:
-        """Drain resource records from Redis list into SQLite."""
+        """Drain resource records from Redis list into SQLite.
+
+        Same at-least-once semantics as _drain_pages — see that
+        docstring for rationale.
+        """
         count = 0
         while True:
             raw = await self.redis.lpop(f"scraper:resources:{job_id}")
@@ -146,7 +170,17 @@ class RedisConsumer:
                 await self.db.add_scrape_resource(resource)
                 count += 1
             except Exception as e:
-                logger.warning(f"Failed to persist resource record: {e}")
+                logger.error(
+                    f"add_scrape_resource failed for job {job_id} ({type(e).__name__}: {e}); "
+                    "requeuing for retry"
+                )
+                try:
+                    await self.redis.rpush(f"scraper:resources:{job_id}", raw)
+                except Exception as ex2:
+                    logger.error(
+                        f"Requeue also failed for job {job_id}: {ex2!r}; record lost: {raw[:200]}"
+                    )
+                break
 
         if count > 0:
             # Update job counters
