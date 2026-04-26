@@ -201,16 +201,17 @@ export default function HistoryPage() {
       ) : (
         <div className="card shadow-base-300/10 shadow-md">
           <div className="card-body p-0">
+            <div className="overflow-x-auto">
             <table className="table">
               <thead>
                 <tr>
-                  <th>Date</th>
+                  <th className="hidden md:table-cell whitespace-nowrap">Date</th>
                   <th>Name</th>
-                  <th>Status</th>
-                  <th>Mode</th>
-                  <th>Items</th>
-                  <th>Duration</th>
-                  <th className="text-end">Actions</th>
+                  <th className="whitespace-nowrap">Status</th>
+                  <th className="hidden lg:table-cell whitespace-nowrap">Mode</th>
+                  <th className="whitespace-nowrap">Items</th>
+                  <th className="hidden lg:table-cell whitespace-nowrap">Duration</th>
+                  <th className="text-end whitespace-nowrap">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -224,29 +225,34 @@ export default function HistoryPage() {
                       className="hover cursor-pointer"
                       onClick={() => navigate(`/job/${job.id}`)}
                     >
-                      <td>
+                      <td className="hidden md:table-cell whitespace-nowrap">
                         <span className="text-xs text-base-content/50">
                           {new Date(job.created_at).toLocaleString()}
                         </span>
                       </td>
-                      <td>
-                        <div className="max-w-xs">
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-medium truncate">
-                              {displayName}
+                      <td className="max-w-0 sm:max-w-xs">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium truncate">
+                            {displayName}
+                          </span>
+                          {(job.seed_urls?.length ?? 0) > 1 && (
+                            <span className="badge badge-soft badge-xs badge-primary shrink-0">
+                              +{job.seed_urls.length - 1}
                             </span>
-                            {(job.seed_urls?.length ?? 0) > 1 && (
-                              <span className="badge badge-soft badge-xs badge-primary shrink-0">
-                                +{job.seed_urls.length - 1}
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-base-content/40 truncate mt-0.5">
-                            {job.seed_urls?.[0] ?? '—'}
-                          </div>
+                          )}
+                        </div>
+                        <div className="text-xs text-base-content/40 truncate mt-0.5">
+                          {job.seed_urls?.[0] ?? '—'}
+                        </div>
+                        {/* Show date + duration here on mobile where their columns are hidden */}
+                        <div className="md:hidden text-[10px] text-base-content/30 mt-0.5">
+                          {new Date(job.created_at).toLocaleDateString()}
+                          {job.duration_seconds != null && (
+                            <span className="ml-1.5">· {formatDuration(job.duration_seconds)}</span>
+                          )}
                         </div>
                       </td>
-                      <td>
+                      <td className="whitespace-nowrap">
                         <span className={`badge badge-soft badge-sm ${config.badge} gap-1`}>
                           <span
                             className={`${config.icon} size-3 ${isRunning ? 'animate-spin' : ''}`}
@@ -254,12 +260,12 @@ export default function HistoryPage() {
                           {job.status}
                         </span>
                       </td>
-                      <td>
+                      <td className="hidden lg:table-cell whitespace-nowrap">
                         <span className="text-xs text-base-content/50">
                           {job.extraction_mode ?? '—'}
                         </span>
                       </td>
-                      <td>
+                      <td className="whitespace-nowrap">
                         <div className="text-sm leading-tight">
                           <div>
                             <span className="text-base-content/40 mr-1">P</span>
@@ -271,12 +277,12 @@ export default function HistoryPage() {
                           </div>
                         </div>
                       </td>
-                      <td>
+                      <td className="hidden lg:table-cell whitespace-nowrap">
                         <span className="text-xs text-base-content/50">
                           {formatDuration(job.duration_seconds)}
                         </span>
                       </td>
-                      <td className="text-end" onClick={(e) => e.stopPropagation()}>
+                      <td className="text-end whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center justify-end gap-1">
                           <button
                             className="btn btn-ghost btn-xs btn-square"
@@ -311,6 +317,7 @@ export default function HistoryPage() {
                 })}
               </tbody>
             </table>
+            </div>
           </div>
         </div>
       )}
