@@ -13,9 +13,9 @@ interface JobStore {
   setActiveJob: (job: JobDetail | null) => void
   updateActiveJob: (updates: Partial<JobDetail>) => void
 
-  // Current wizard step (0-indexed)
-  currentStep: number
-  setCurrentStep: (step: number) => void
+  // Wizard step completion tracking. The current step itself is derived
+  // from the URL (/job/:id/:stage) — this set just tracks which steps the
+  // user has finished so the stepper can render check marks.
   completedSteps: Set<number>
   markStepCompleted: (step: number) => void
 
@@ -42,8 +42,6 @@ export const useJobStore = create<JobStore>((set, get) => ({
       activeJob: state.activeJob ? { ...state.activeJob, ...updates } : null,
     })),
 
-  currentStep: 0,
-  setCurrentStep: (step) => set({ currentStep: step }),
   completedSteps: new Set<number>(),
   markStepCompleted: (step) =>
     set((state) => {

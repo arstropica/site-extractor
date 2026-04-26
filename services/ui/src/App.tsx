@@ -133,6 +133,7 @@ function AppContent() {
               <Route path="/" element={<HistoryPage />} />
               <Route path="/schemas" element={<SchemasPage />} />
               <Route path="/job/:jobId" element={<WizardPage />} />
+              <Route path="/job/:jobId/:stage" element={<WizardPage />} />
             </Routes>
           </div>
         </main>

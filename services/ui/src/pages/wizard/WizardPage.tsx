@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { jobs, extraction, type ScrapeConfig } from '@/api/client'
+import { jobs, extraction, type JobDetail, type ScrapeConfig } from '@/api/client'
 import { useJobStore } from '@/stores/jobStore'
 import Stepper from '@/components/Stepper'
 import EditableTitle from '@/components/EditableTitle'
@@ -11,24 +11,49 @@ import SchemaBuilderStep from './SchemaBuilderStep'
 import ContentMapperStep from './ContentMapperStep'
 import ResultsStep from './ResultsStep'
 
+// URL-stage <-> step-index mapping. The URL is the source of truth for
+// which step the wizard shows, so refresh / back-button / deep-linking
+// all work without resetting to step 0 or auto-jumping based on status.
+const STAGES = ['config', 'scrape', 'schema', 'mapper', 'results'] as const
+type Stage = (typeof STAGES)[number]
+const STAGE_TO_INDEX: Record<Stage, number> = {
+  config: 0, scrape: 1, schema: 2, mapper: 3, results: 4,
+}
+const isStage = (s: string | undefined): s is Stage =>
+  !!s && (STAGES as readonly string[]).includes(s)
+
+function stageForJobStatus(job: JobDetail | null): Stage {
+  if (!job) return 'config'
+  switch (job.status) {
+    case 'created': return 'config'
+    case 'scraping':
+    case 'paused':
+    case 'failed':
+    case 'cancelled': return 'scrape'
+    case 'scraped': return 'schema'
+    case 'mapping': return 'mapper'
+    case 'extracting':
+    case 'completed': return 'results'
+    default: return 'config'
+  }
+}
+
 const STEPS = [
   { id: 'config', label: 'Scraper Config', description: 'URLs & settings' },
-  { id: 'monitor', label: 'Scrape Monitor', description: 'Real-time progress' },
+  { id: 'scrape', label: 'Scrape Monitor', description: 'Real-time progress' },
   { id: 'schema', label: 'Schema Builder', description: 'Define structure' },
   { id: 'mapper', label: 'Content Mapper', description: 'Map selectors' },
   { id: 'results', label: 'Results', description: 'View & export' },
 ]
 
 export default function WizardPage() {
-  const { jobId } = useParams<{ jobId: string }>()
+  const { jobId, stage: urlStage } = useParams<{ jobId: string; stage?: string }>()
   const navigate = useNavigate()
   const isNew = jobId === 'new'
 
   const {
     activeJob,
     setActiveJob,
-    currentStep,
-    setCurrentStep,
     completedSteps,
     markStepCompleted,
     clearScrapeEvents,
@@ -36,6 +61,19 @@ export default function WizardPage() {
     draftName,
     setDraft,
   } = useJobStore()
+
+  // Derive the current step from the URL stage. If the URL has no stage
+  // segment yet (or an invalid one), currentStep falls back to 0 until
+  // the redirect effect below kicks in.
+  const currentStep = isStage(urlStage) ? STAGE_TO_INDEX[urlStage] : 0
+
+  const goToStage = useCallback(
+    (stage: Stage, opts?: { replace?: boolean }) => {
+      if (!jobId) return
+      navigate(`/job/${jobId}/${stage}`, { replace: opts?.replace })
+    },
+    [jobId, navigate],
+  )
 
   // Snapshot the draft config (set by HistoryPage's clone button) at mount,
   // then clear it from the store so it doesn't leak into a later /job/new
@@ -62,82 +100,38 @@ export default function WizardPage() {
     },
   })
 
-  const initializedJobIdRef = useRef<string | null>(null)
-  const prevStatusRef = useRef<string | null>(null)
-
+  // Sync activeJob from query + recompute completion marks for the stepper.
+  // No automatic step navigation here — the URL is the source of truth.
   useEffect(() => {
     if (isNew) {
       setActiveJob(null)
-      setCurrentStep(0)
       clearScrapeEvents()
-      initializedJobIdRef.current = null
-      prevStatusRef.current = null
       return
     }
-
     if (!jobData) return
-
     setActiveJob(jobData)
 
-    // Compute the step implied by job status
-    let targetStep = 0
-    switch (jobData.status) {
-      case 'created':
-        targetStep = 0
-        break
-      case 'scraping':
-      case 'paused':
-        targetStep = 1
-        markStepCompleted(0)
-        break
-      case 'scraped':
-        targetStep = 2
-        markStepCompleted(0)
-        markStepCompleted(1)
-        break
-      case 'mapping':
-        targetStep = 3
-        markStepCompleted(0)
-        markStepCompleted(1)
-        markStepCompleted(2)
-        break
-      case 'extracting':
-      case 'completed':
-        targetStep = 4
-        markStepCompleted(0)
-        markStepCompleted(1)
-        markStepCompleted(2)
-        markStepCompleted(3)
-        if (jobData.status === 'completed') markStepCompleted(4)
-        break
-      default:
-        targetStep = 0
+    // Step completion marks (visual ticks in the stepper) follow status:
+    // every step at or below the status-implied stage is "complete".
+    const impliedStage = stageForJobStatus(jobData)
+    const impliedStep = STAGE_TO_INDEX[impliedStage]
+    for (let i = 0; i < impliedStep; i++) markStepCompleted(i)
+    if (jobData.status === 'completed') markStepCompleted(4)
+  }, [isNew, jobData, setActiveJob, markStepCompleted, clearScrapeEvents])
+
+  // Stage normalization: redirect once on mount when the URL has no stage
+  // (or an invalid stage). Replace-history so the bare /job/<id> URL
+  // doesn't sit in browser history.
+  useEffect(() => {
+    if (!jobId) return
+    if (isStage(urlStage)) return
+    if (isNew) {
+      navigate(`/job/new/config`, { replace: true })
+      return
     }
-
-    const isInitialLoad = initializedJobIdRef.current !== jobData.id
-    const statusChanged = prevStatusRef.current !== jobData.status
-
-    if (isInitialLoad) {
-      // First load for this job: jump to step implied by status, but never
-      // regress below where the wizard's create flow has already set us.
-      const current = useJobStore.getState().currentStep
-      if (targetStep > current) {
-        setCurrentStep(targetStep)
-      }
-      initializedJobIdRef.current = jobData.id
-    } else if (statusChanged) {
-      // Status advanced (e.g., scraping → scraped): advance the step too,
-      // but only if the user hasn't already navigated past it manually.
-      const current = useJobStore.getState().currentStep
-      if (targetStep > current) {
-        setCurrentStep(targetStep)
-      }
-    }
-    // If neither initial load nor status change, do not touch currentStep —
-    // this lets the user click stepper buttons to navigate freely.
-
-    prevStatusRef.current = jobData.status
-  }, [isNew, jobData, setActiveJob, setCurrentStep, markStepCompleted, clearScrapeEvents])
+    if (!jobData) return // wait until we know the job's status
+    navigate(`/job/${jobId}/${stageForJobStatus(jobData)}`, { replace: true })
+  }, [jobId, urlStage, isNew, jobData, navigate])
 
   // Scrape progress for stepper animation
   const scrapeProgress: Record<number, number> = {}
@@ -165,9 +159,8 @@ export default function WizardPage() {
       const newJob = await jobs.get(result.job_id)
       setActiveJob(newJob)
       markStepCompleted(0)
-      setCurrentStep(1)
       clearScrapeEvents()
-      navigate(`/job/${result.job_id}`, { replace: true })
+      navigate(`/job/${result.job_id}/scrape`, { replace: true })
       await jobs.startScrape(result.job_id)
       const updated = await jobs.get(result.job_id)
       setActiveJob(updated)
@@ -177,18 +170,18 @@ export default function WizardPage() {
   const handleStepClick = useCallback(
     (step: number) => {
       if (completedSteps.has(step) || step === currentStep) {
-        setCurrentStep(step)
+        goToStage(STAGES[step])
       }
     },
-    [completedSteps, currentStep, setCurrentStep],
+    [completedSteps, currentStep, goToStage],
   )
 
   const goToStep = useCallback(
     (step: number) => {
       markStepCompleted(step - 1)
-      setCurrentStep(step)
+      goToStage(STAGES[step])
     },
-    [markStepCompleted, setCurrentStep],
+    [markStepCompleted, goToStage],
   )
 
   const queryClient = useQueryClient()
@@ -212,9 +205,9 @@ export default function WizardPage() {
 
   const handleMapperContinue = useCallback(() => {
     markStepCompleted(3)
-    setCurrentStep(4)
+    goToStage('results')
     startExtractionMutation.mutate()
-  }, [markStepCompleted, setCurrentStep, startExtractionMutation])
+  }, [markStepCompleted, goToStage, startExtractionMutation])
 
   return (
     <>
