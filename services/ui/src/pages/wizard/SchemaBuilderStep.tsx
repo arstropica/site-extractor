@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { schemas as schemasApi, type SchemaField, type SchemaFieldType } from '@/api/client'
+import { schemas as schemasApi, jobs as jobsApi, type SchemaField, type SchemaFieldType } from '@/api/client'
 import { useSchemaStore } from '@/stores/schemaStore'
 import { useJobStore } from '@/stores/jobStore'
 
@@ -117,7 +117,27 @@ function FieldEditor({
 
 export default function SchemaBuilderStep({ onContinue }: SchemaBuilderStepProps) {
   const { fields, setFields, schemaName, setSchemaName, schemaId, setSchemaId, jsonMode, setJsonMode } = useSchemaStore()
-  const { activeJob } = useJobStore()
+  const { activeJob, updateActiveJob } = useJobStore()
+
+  // Persist a schema choice to the job's extraction_config so the mapper
+  // (and any future refresh of either step) can read it back. Without this,
+  // the schema_id only ever lands on the job at extraction-run time.
+  const persistSchemaIdToJob = useCallback(async (newSchemaId: string) => {
+    if (!activeJob) return
+    if (activeJob.extraction_config?.schema_id === newSchemaId) return
+    const next = {
+      ...(activeJob.extraction_config || { mode: 'document' as const, file_patterns: [] }),
+      mode: activeJob.extraction_config?.mode ?? 'document' as const,
+      schema_id: newSchemaId,
+    }
+    try {
+      const updated = await jobsApi.update(activeJob.id, { extraction_config: next })
+      updateActiveJob({ extraction_config: updated.extraction_config })
+    } catch (e) {
+      // Non-fatal — user can still continue; we just won't survive refresh
+      console.warn('Failed to persist schema_id to job:', e)
+    }
+  }, [activeJob, updateActiveJob])
   const [jsonText, setJsonText] = useState('')
   const [jsonError, setJsonError] = useState<string | null>(null)
 
@@ -177,9 +197,12 @@ export default function SchemaBuilderStep({ onContinue }: SchemaBuilderStepProps
         setFields(schema.fields)
         setSchemaName(schema.name)
         setSchemaId(schema.id)
+        // Save the choice to the job immediately so a refresh of either
+        // this step or the mapper finds the schema_id on activeJob.
+        persistSchemaIdToJob(schema.id)
       }
     },
-    [savedSchemas, setFields, setSchemaName, setSchemaId],
+    [savedSchemas, setFields, setSchemaName, setSchemaId, persistSchemaIdToJob],
   )
 
   const switchToJson = useCallback(() => {
@@ -204,6 +227,7 @@ export default function SchemaBuilderStep({ onContinue }: SchemaBuilderStepProps
   const saveMutation = useMutation({
     mutationFn: async () => {
       const name = schemaName.trim() || 'Untitled Schema'
+      let idToPersist = schemaId
       if (schemaId) {
         // Update existing schema
         await schemasApi.update(schemaId, { name, fields })
@@ -211,7 +235,10 @@ export default function SchemaBuilderStep({ onContinue }: SchemaBuilderStepProps
         // Create new schema
         const created = await schemasApi.create({ name, fields })
         setSchemaId(created.id)
+        idToPersist = created.id
       }
+      // Save reference on the job too, so the mapper has it after refresh.
+      if (idToPersist) await persistSchemaIdToJob(idToPersist)
       setSaveStatus('saved')
       setTimeout(() => setSaveStatus('idle'), 2000)
     },

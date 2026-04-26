@@ -21,7 +21,29 @@ interface ContentMapperStepProps {
 
 export default function ContentMapperStep({ onContinue }: ContentMapperStepProps) {
   const { activeJob, updateActiveJob } = useJobStore()
-  const { fields, schemaId, setSchemaId, schemaName } = useSchemaStore()
+  const { fields, schemaId, setSchemaId, schemaName, setFields, setSchemaName } = useSchemaStore()
+
+  // Hydrate the schema fields (which live in the schemaStore) from the
+  // schema_id persisted on the job. Without this, refreshing the mapper
+  // shows zero fields because the in-memory schemaStore was wiped on
+  // reload — only the schema_id survived (on the job).
+  const persistedSchemaId = activeJob?.extraction_config?.schema_id
+  const { data: hydratedSchema } = useQuery({
+    queryKey: ['schema', persistedSchemaId],
+    queryFn: () => schemasApi.get(persistedSchemaId!),
+    enabled: !!persistedSchemaId,
+    staleTime: 30000,
+  })
+  useEffect(() => {
+    if (!hydratedSchema) return
+    // Only repopulate if the store doesn't already have this schema's
+    // fields — avoids clobbering in-progress edits the user made in
+    // the Schema Builder before navigating here.
+    if (schemaId === hydratedSchema.id && fields.length > 0) return
+    setFields(hydratedSchema.fields)
+    setSchemaName(hydratedSchema.name)
+    setSchemaId(hydratedSchema.id)
+  }, [hydratedSchema, schemaId, fields.length, setFields, setSchemaName, setSchemaId])
 
   // Initialize state from saved extraction_config (if any)
   const savedConfig = activeJob?.extraction_config
