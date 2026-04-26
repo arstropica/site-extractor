@@ -42,7 +42,10 @@ async def start_extraction(job_id: str, request: Request):
         if schema:
             schema_fields = schema["fields"]
 
-    # Forward to extraction service
+    # Forward to extraction service. On a non-2xx response we want to
+    # surface the upstream "detail" (the actual Python exception message
+    # extraction-service set in its 500) instead of the bare httpx
+    # "Server error '500 Internal Server Error'" that loses all context.
     try:
         async with httpx.AsyncClient(timeout=300.0) as client:
             resp = await client.post(
@@ -53,14 +56,20 @@ async def start_extraction(job_id: str, request: Request):
                     "schema_fields": schema_fields,
                 },
             )
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                upstream_detail = ""
+                try:
+                    upstream_detail = resp.json().get("detail", resp.text[:500])
+                except Exception:
+                    upstream_detail = resp.text[:500]
+                msg = f"Extraction service {resp.status_code}: {upstream_detail}"
+                await db.update_job(job_id, {"status": "failed", "error_message": msg})
+                raise HTTPException(status_code=502, detail=msg)
             result = resp.json()
     except httpx.HTTPError as e:
-        await db.update_job(job_id, {
-            "status": "failed",
-            "error_message": f"Extraction service error: {str(e)}",
-        })
-        raise HTTPException(status_code=502, detail=f"Extraction service error: {str(e)}")
+        msg = f"Extraction service unreachable: {type(e).__name__}: {e}"
+        await db.update_job(job_id, {"status": "failed", "error_message": msg})
+        raise HTTPException(status_code=502, detail=msg)
 
     # Persist results to SQLite
     result_id = result.get("result_id", "")
