@@ -190,27 +190,60 @@ async def _load_resources(redis_client, job_id: str) -> list:
 async def _fetch_paginated(path: str, field: str, page_size: int = 1000) -> list:
     """GET /api/.../<list-endpoint> with offset/limit until exhausted.
 
-    The gateway caps the per-call limit at 1000; we loop until the returned
-    chunk is shorter than that, accumulating into a single list. Tiny perf
-    cost, but it keeps callers from accidentally truncating at >1000-record
-    jobs.
+    Retries each page on transient failures (timeout, connection drop,
+    non-JSON response) up to a few times with backoff. The non-JSON case
+    has been observed in production — under load the gateway has
+    occasionally served the SPA index.html instead of the API route's
+    JSON, which is plausibly route-resolution choosing the catchall by
+    accident. Retry usually clears it; we still log enough detail on
+    every failure to confirm whether that's what's happening.
     """
     out = []
     offset = 0
     base_url = settings.GATEWAY_URL.rstrip("/")
     async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
-            resp = await client.get(
-                f"{base_url}{path}",
-                params={"limit": page_size, "offset": offset},
-            )
-            resp.raise_for_status()
-            chunk = resp.json().get(field, [])
+            chunk = await _fetch_one_page(client, f"{base_url}{path}", field, page_size, offset)
             out.extend(chunk)
             if len(chunk) < page_size:
                 break
             offset += page_size
     return out
+
+
+async def _fetch_one_page(client, url: str, field: str, page_size: int, offset: int) -> list:
+    """Fetch one paginated chunk with retry-on-transient-failure."""
+    import asyncio as _asyncio
+    last_err = None
+    for attempt in range(4):
+        try:
+            resp = await client.get(url, params={"limit": page_size, "offset": offset})
+            resp.raise_for_status()
+            payload = resp.json()
+            return payload.get(field, [])
+        except (httpx.HTTPError, httpx.TimeoutException, _asyncio.TimeoutError, ValueError) as e:
+            last_err = e
+            ct = ""
+            body = ""
+            if isinstance(e, ValueError):
+                # JSON parse failed — log enough context to tell whether
+                # it was the gateway misrouting (HTML body) or some other
+                # corruption.
+                try:
+                    ct = resp.headers.get("content-type", "")
+                    body = resp.text[:300]
+                except Exception:
+                    pass
+            logger.warning(
+                f"GET {url} offset={offset} attempt {attempt + 1}/4 failed: "
+                f"{type(e).__name__}: {e} | content-type={ct!r} body={body!r}"
+            )
+            if attempt < 3:
+                await _asyncio.sleep(0.5 * (2 ** attempt))
+    raise HTTPException(
+        status_code=502,
+        detail=f"Gateway page-list fetch failed after 4 attempts: {type(last_err).__name__}: {last_err}",
+    )
 
 
 async def _publish(redis_client, job_id: str, event_type: str, data: dict):

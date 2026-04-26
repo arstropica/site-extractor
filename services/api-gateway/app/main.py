@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -170,7 +170,18 @@ if _static_dir.is_dir():
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
-        """Serve static files or fall back to index.html for SPA routing."""
+        """Serve static files or fall back to index.html for SPA routing.
+
+        Defensive 404 for /api/* and /ws so this catchall can never
+        accidentally serve HTML for an API route — the symptom we hit in
+        production was extraction-service receiving index.html for
+        /api/pages/<id> and choking on JSONDecodeError. Concrete API
+        routes should always win during normal route resolution, but
+        making the catchall explicitly opt out is cheap insurance against
+        any future routing quirk.
+        """
+        if full_path.startswith("api/") or full_path == "api" or full_path.startswith("ws"):
+            raise HTTPException(status_code=404, detail="Not Found")
         file_path = _static_dir / full_path
         if full_path and file_path.is_file():
             return FileResponse(file_path)
