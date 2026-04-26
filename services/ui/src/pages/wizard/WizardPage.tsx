@@ -169,11 +169,13 @@ export default function WizardPage() {
 
   const handleStepClick = useCallback(
     (step: number) => {
-      if (completedSteps.has(step) || step === currentStep) {
-        goToStage(STAGES[step])
-      }
+      // Trust the Stepper's accessibility check (it already disables
+      // unreachable steps and only fires onStepClick for accessible ones).
+      // No further gating here — the URL is the source of truth, so any
+      // accessible step click should navigate.
+      goToStage(STAGES[step])
     },
-    [completedSteps, currentStep, goToStage],
+    [goToStage],
   )
 
   const goToStep = useCallback(
