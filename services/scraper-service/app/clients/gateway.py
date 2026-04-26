@@ -60,6 +60,22 @@ class GatewayClient:
                 return True
             except (httpx.HTTPError, httpx.TimeoutException, asyncio.TimeoutError) as e:
                 last_err = e
+                # When the gateway returns a non-2xx, surface the actual
+                # response body + Allow header so we can tell a real
+                # FastAPI 405 (body {"detail":"Method Not Allowed"}) from
+                # a transport-level oddity (stale keep-alive bytes,
+                # intermediate proxy, etc.).
+                if isinstance(e, httpx.HTTPStatusError):
+                    try:
+                        body_snip = e.response.text[:300]
+                        allow = e.response.headers.get("allow", "<absent>")
+                        server = e.response.headers.get("server", "<absent>")
+                        logger.warning(
+                            f"POST {path} -> {e.response.status_code} "
+                            f"server={server} allow={allow} body={body_snip!r}"
+                        )
+                    except Exception:
+                        pass
                 if attempt < max_attempts - 1:
                     backoff = 0.5 * (2 ** attempt)
                     logger.warning(
