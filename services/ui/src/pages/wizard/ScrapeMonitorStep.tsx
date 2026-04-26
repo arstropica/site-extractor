@@ -45,6 +45,7 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
 
   const totalDiscovered = (activeJob.pages_discovered ?? 0) + (activeJob.resources_discovered ?? 0)
   const totalDownloaded = (activeJob.pages_downloaded ?? 0) + (activeJob.resources_downloaded ?? 0)
+  const totalErrored = (activeJob.pages_errored ?? 0) + (activeJob.resources_errored ?? 0)
   const progress = totalDiscovered > 0
     ? Math.min((totalDownloaded / totalDiscovered) * 100, 100)
     : 0
@@ -81,7 +82,7 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
   return (
     <div className="space-y-6">
       {/* Stats row */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
         <div className="bg-base-200/50 rounded-xl p-4">
           <p className="text-xs text-base-content/40 uppercase tracking-wider">Status</p>
           <p className={`text-lg font-semibold mt-1 ${
@@ -102,6 +103,12 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
           <p className="text-lg font-semibold mt-1">
             {activeJob.resources_downloaded ?? 0}
             <span className="text-sm text-base-content/40"> / {activeJob.resources_discovered ?? 0}</span>
+          </p>
+        </div>
+        <div className="bg-base-200/50 rounded-xl p-4">
+          <p className="text-xs text-base-content/40 uppercase tracking-wider">Errors</p>
+          <p className={`text-lg font-semibold mt-1 ${totalErrored > 0 ? 'text-error' : ''}`}>
+            {totalErrored}
           </p>
         </div>
         <div className="bg-base-200/50 rounded-xl p-4">

@@ -235,8 +235,10 @@ export interface JobDetail {
   progress_message: string
   pages_discovered: number
   pages_downloaded: number
+  pages_errored: number
   resources_discovered: number
   resources_downloaded: number
+  resources_errored: number
   bytes_downloaded: number
   error_message?: string
   created_at: string

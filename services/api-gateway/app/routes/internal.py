@@ -45,7 +45,11 @@ async def add_pages(request: Request):
             # Log but don't fail the whole batch — record skipped, others proceed
             logger.error(f"add_scrape_page failed for {p.get('id')}: {e!r}")
 
-    # Counter recompute per job touched
+    # Counter recompute per job touched. Pages: we keep both downloaded
+    # (rows with status="downloaded") and discovered (all rows) since for
+    # pages, discovered = "queued for crawling" is meaningful. The errored
+    # count for pages is owned by the scraper's in-memory state and lands
+    # via SCRAPE_PROGRESS events / mark_scraped — not derived here.
     for jid in job_ids:
         total_dl = await db.count_scrape_pages(jid, status="downloaded")
         total_disc = await db.count_scrape_pages(jid)
@@ -72,12 +76,15 @@ async def add_resources(request: Request):
         except Exception as e:
             logger.error(f"add_scrape_resource failed for {r.get('id')}: {e!r}")
 
+    # Recompute resources_downloaded from the persisted rows; intentionally
+    # do NOT touch resources_discovered or resources_errored here. Those
+    # are owned by the scraper's in-memory state (silent skips like
+    # MIME-filter rejection and content-hash dedup are deliberately
+    # excluded from the visible counters), and land on the job row via
+    # SCRAPE_PROGRESS events and the final mark_scraped.
     for jid in job_ids:
         total = await db.count_scrape_resources(jid)
-        await db.update_job(jid, {
-            "resources_downloaded": total,
-            "resources_discovered": total,
-        })
+        await db.update_job(jid, {"resources_downloaded": total})
     return {"inserted": inserted}
 
 
@@ -100,8 +107,10 @@ async def mark_scraped(job_id: str, request: Request):
         "scraped_at": datetime.utcnow().isoformat(),
         "pages_discovered": int(body.get("pages_discovered", 0)),
         "pages_downloaded": int(body.get("pages_downloaded", 0)),
+        "pages_errored": int(body.get("pages_errored", 0)),
         "resources_discovered": int(body.get("resources_discovered", 0)),
         "resources_downloaded": int(body.get("resources_downloaded", 0)),
+        "resources_errored": int(body.get("resources_errored", 0)),
         "bytes_downloaded": int(body.get("bytes_downloaded", 0)),
     })
     return {"updated": True}

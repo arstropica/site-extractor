@@ -230,8 +230,10 @@ class Job(BaseModel):
     progress_message: str = ""
     pages_discovered: int = 0
     pages_downloaded: int = 0
+    pages_errored: int = 0
     resources_discovered: int = 0
     resources_downloaded: int = 0
+    resources_errored: int = 0
     bytes_downloaded: int = 0
     error_message: Optional[str] = None
 
@@ -265,8 +267,10 @@ class JobStatusResponse(BaseModel):
     progress_message: str
     pages_discovered: int
     pages_downloaded: int
+    pages_errored: int = 0
     resources_discovered: int = 0
     resources_downloaded: int = 0
+    resources_errored: int = 0
     bytes_downloaded: int
     error_message: Optional[str] = None
     created_at: datetime

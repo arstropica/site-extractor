@@ -133,6 +133,16 @@ class Database:
             except Exception:
                 pass  # column already exists
 
+        # Migration: add pages_errored / resources_errored columns. These
+        # split the discovered/downloaded gap into "succeeded" and "errored"
+        # so the user can audit failures explicitly.
+        for col in ("pages_errored", "resources_errored"):
+            try:
+                await self._db.execute(f"ALTER TABLE jobs ADD COLUMN {col} INTEGER DEFAULT 0")
+                await self._db.commit()
+            except Exception:
+                pass  # column already exists
+
     # ── Jobs ──────────────────────────────────────────────────────────────
 
     async def create_job(self, job: dict) -> None:
@@ -255,8 +265,8 @@ class Database:
         await self._db.execute(
             """UPDATE jobs SET
                 progress = 0.0, progress_message = '',
-                pages_discovered = 0, pages_downloaded = 0,
-                resources_discovered = 0, resources_downloaded = 0,
+                pages_discovered = 0, pages_downloaded = 0, pages_errored = 0,
+                resources_discovered = 0, resources_downloaded = 0, resources_errored = 0,
                 bytes_downloaded = 0, error_message = NULL,
                 scraped_at = NULL, completed_at = NULL
                WHERE id = ?""",

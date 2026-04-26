@@ -67,19 +67,27 @@ export const useJobStore = create<JobStore>((set, get) => ({
 
     const data = event.data
 
-    // Update progress (pages and resources tracked separately)
+    // Update progress (pages and resources tracked separately).
+    // resources_total here is downloaded + errored (visible attempts only);
+    // silent skips like MIME-filter rejection and content-hash dedup are
+    // intentionally excluded from the totals. The errored counters are the
+    // explicit "what went wrong" partition.
     if (event.type === 'SCRAPE_PROGRESS') {
       const pagesTotal = (data.pages_total as number) ?? activeJob.pages_discovered
       const pagesDone = (data.pages_done as number) ?? activeJob.pages_downloaded
+      const pagesErr = (data.pages_errored as number) ?? activeJob.pages_errored ?? 0
       const resTotal = (data.resources_total as number) ?? activeJob.resources_discovered
       const resDone = (data.resources_done as number) ?? activeJob.resources_downloaded
+      const resErr = (data.resources_errored as number) ?? activeJob.resources_errored ?? 0
       const totalAll = pagesTotal + resTotal
       const doneAll = pagesDone + resDone
       get().updateActiveJob({
         pages_discovered: pagesTotal,
         pages_downloaded: pagesDone,
+        pages_errored: pagesErr,
         resources_discovered: resTotal,
         resources_downloaded: resDone,
+        resources_errored: resErr,
         bytes_downloaded: (data.bytes_downloaded as number) ?? activeJob.bytes_downloaded,
         progress: totalAll > 0 ? (doneAll / totalAll) * 100 : activeJob.progress,
       })
@@ -94,8 +102,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
         if (event.type === 'SCRAPE_STATUS' && status === 'scraped') {
           if (typeof data.pages_discovered === 'number') updates.pages_discovered = data.pages_discovered
           if (typeof data.pages_downloaded === 'number') updates.pages_downloaded = data.pages_downloaded
+          if (typeof data.pages_errored === 'number') updates.pages_errored = data.pages_errored
           if (typeof data.resources_discovered === 'number') updates.resources_discovered = data.resources_discovered
           if (typeof data.resources_downloaded === 'number') updates.resources_downloaded = data.resources_downloaded
+          if (typeof data.resources_errored === 'number') updates.resources_errored = data.resources_errored
           if (typeof data.bytes_downloaded === 'number') updates.bytes_downloaded = data.bytes_downloaded
         }
         get().updateActiveJob(updates)

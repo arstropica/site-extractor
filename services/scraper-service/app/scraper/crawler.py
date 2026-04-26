@@ -40,12 +40,29 @@ class CrawlState:
         # Pages = HTML documents; Resources = files (media, docs, etc.)
         self.pages_discovered = 0
         self.pages_downloaded = 0
-        self.resources_discovered = 0
+        self.pages_errored = 0
+        # Resources are partitioned as: downloaded (succeeded) + errored
+        # (SCRAPE_ERROR was emitted). Silent skips — MIME filter rejection,
+        # content-hash dedup against an already-saved asset — are NOT
+        # counted in either, so resources_discovered (downloaded + errored)
+        # represents only the visible attempts the user can audit in the
+        # activity log.
         self.resources_downloaded = 0
+        self.resources_errored = 0
         self.bytes_downloaded = 0
         self.errors: list = []
         self.paused = False
         self.cancelled = False
+
+    @property
+    def resources_discovered(self) -> int:
+        """Computed: visible resource attempts (successful + errored).
+
+        Kept as the same field name in API/UI for backward compat, but
+        no longer represents 'all URLs we considered' — that included
+        silent skips and made the discovered/downloaded delta opaque.
+        """
+        return self.resources_downloaded + self.resources_errored
 
     def save(self, job_dir: Path):
         """Persist crawl state to disk for resume support."""
@@ -56,8 +73,9 @@ class CrawlState:
             "downloaded_hashes": list(self.downloaded_hashes),
             "pages_discovered": self.pages_discovered,
             "pages_downloaded": self.pages_downloaded,
-            "resources_discovered": self.resources_discovered,
+            "pages_errored": self.pages_errored,
             "resources_downloaded": self.resources_downloaded,
+            "resources_errored": self.resources_errored,
             "bytes_downloaded": self.bytes_downloaded,
         }, indent=2))
 
@@ -73,8 +91,9 @@ class CrawlState:
             state.downloaded_hashes = set(data.get("downloaded_hashes", []))
             state.pages_discovered = data.get("pages_discovered", 0)
             state.pages_downloaded = data.get("pages_downloaded", 0)
-            state.resources_discovered = data.get("resources_discovered", 0)
+            state.pages_errored = data.get("pages_errored", 0)
             state.resources_downloaded = data.get("resources_downloaded", 0)
+            state.resources_errored = data.get("resources_errored", 0)
             state.bytes_downloaded = data.get("bytes_downloaded", 0)
         return state
 
@@ -388,8 +407,10 @@ class Crawler:
             completion_data = {
                 "pages_discovered": state.pages_discovered,
                 "pages_downloaded": state.pages_downloaded,
-                "resources_discovered": state.resources_discovered,
+                "pages_errored": state.pages_errored,
+                "resources_discovered": state.resources_discovered,  # property: downloaded + errored
                 "resources_downloaded": state.resources_downloaded,
+                "resources_errored": state.resources_errored,
                 "bytes_downloaded": state.bytes_downloaded,
             }
             # Direct UPDATE on the jobs row via the gateway, replacing the
@@ -492,7 +513,9 @@ class Crawler:
                         if html is None:
                             err = response_headers.get("_fetch_error") if response_headers else None
                             if err:
-                                state.errors.append({"url": url, "error": err})
+                                async with self._state_lock:
+                                    state.pages_errored += 1
+                                    state.errors.append({"url": url, "error": err})
                                 await self._publish_event(self._job_id, "SCRAPE_ERROR", {
                                     "url": url, "error": err,
                                 })
@@ -559,9 +582,12 @@ class Crawler:
                                 state.queued_urls.append((link, depth + 1, url))
                                 link_cat = resource_filter.get_category(link)
                                 is_resource = bool(link_cat and link_cat != "web_pages")
-                                if is_resource:
-                                    state.resources_discovered += 1
-                                else:
+                                # Pages keep queue-time discovery accounting
+                                # (we know up-front how many we want to crawl).
+                                # Resources don't — discovered is computed
+                                # downstream as downloaded + errored, and
+                                # silent skips are intentionally excluded.
+                                if not is_resource:
                                     state.pages_discovered += 1
                             event_type = "RESOURCE_DISCOVERED" if is_resource else "PAGE_DISCOVERED"
                             await self._publish_event(self._job_id, event_type, {
@@ -579,10 +605,6 @@ class Crawler:
                     asset_urls = self._extract_assets(html, url)
                     asset_tasks = []
                     asset_sem = asyncio.Semaphore(self._max_total)
-                    # Track which embedded-asset URLs we've already considered
-                    # for THIS page so duplicate references inside one page
-                    # (e.g. the same logo in multiple sprites) only count
-                    # once toward resources_discovered.
                     seen_for_page: set[str] = set()
                     for asset_url in asset_urls:
                         if asset_url in seen_for_page:
@@ -591,15 +613,12 @@ class Crawler:
                         if not resource_filter.should_consider(asset_url):
                             continue
                         category_hint = resource_filter.get_category(asset_url)
-
-                        # Embedded assets are dispatched directly (not queued
-                        # through the link-discovery path), so the
-                        # resources_discovered counter has to be bumped here
-                        # to keep the discovered/downloaded tallies coherent
-                        # in the wizard counters and the final mark_scraped
-                        # payload. Without this the UI shows e.g. 2146/0.
-                        async with self._state_lock:
-                            state.resources_discovered += 1
+                        # No upfront discovered bump — the asset's outcome
+                        # (downloaded, errored, or silently skipped via
+                        # MIME filter / dedup) is decided inside
+                        # _download_asset and bumps the right counter
+                        # there. resources_discovered is computed as
+                        # downloaded + errored on read.
 
                         async def _bounded(u=asset_url, c=category_hint):
                             async with asset_sem:
@@ -611,14 +630,20 @@ class Crawler:
                     if asset_tasks:
                         await asyncio.gather(*asset_tasks, return_exceptions=True)
 
-                    # Progress event (read-only snapshot of counters)
+                    # Progress event (read-only snapshot of counters).
+                    # pages_total = pages_discovered (queued URLs we plan to
+                    # crawl); the gap from done → total is in-flight + errored.
+                    # resources_total = downloaded + errored (visible attempts);
+                    # silent skips (filter / dedup) are excluded by design.
                     pages_total = max(state.pages_discovered, state.pages_downloaded)
-                    resources_total = max(state.resources_discovered, state.resources_downloaded)
+                    resources_total = state.resources_downloaded + state.resources_errored
                     await self._publish_event(self._job_id, "SCRAPE_PROGRESS", {
                         "pages_done": state.pages_downloaded,
                         "pages_total": pages_total,
+                        "pages_errored": state.pages_errored,
                         "resources_done": state.resources_downloaded,
                         "resources_total": resources_total,
+                        "resources_errored": state.resources_errored,
                         "estimated_total": pages_total + resources_total,
                         "bytes_downloaded": state.bytes_downloaded,
                         "max_bytes": self._max_size,
@@ -626,7 +651,9 @@ class Crawler:
 
                 except Exception as e:
                     logger.error(f"Error crawling {url}: {e}")
-                    state.errors.append({"url": url, "error": str(e)})
+                    async with self._state_lock:
+                        state.pages_errored += 1
+                        state.errors.append({"url": url, "error": str(e)})
                     await self._publish_event(self._job_id, "SCRAPE_ERROR", {
                         "url": url, "error": str(e),
                     })
@@ -787,6 +814,8 @@ class Crawler:
         # All retries exhausted — surface the cause.
         msg = f"{type(last_err).__name__}: {last_err}" if last_err else "unknown"
         logger.warning(f"Asset download failed for {url} after {attempts} attempts: {msg}")
+        async with self._state_lock:
+            state.resources_errored += 1
         try:
             await self._publish_event(job_id, "SCRAPE_ERROR", {
                 "url": url,
@@ -824,6 +853,8 @@ class Crawler:
                     # Server doesn't allow HEAD; we'll guard during stream
                     skip_size_check = True
                 elif head.status_code != 200:
+                    async with self._state_lock:
+                        state.resources_errored += 1
                     await self._publish_event(job_id, "SCRAPE_ERROR", {
                         "url": url,
                         "error": f"Asset HEAD returned HTTP {head.status_code}",
@@ -850,6 +881,8 @@ class Crawler:
                         logger.info(
                             f"Skipping {url}: declared size {head_len} > MAX_ASSET_SIZE {max_asset}"
                         )
+                        async with self._state_lock:
+                            state.resources_errored += 1
                         await self._publish_event(job_id, "SCRAPE_ERROR", {
                             "url": url,
                             "error": f"Skipped — file too large ({head_len} bytes)",
@@ -914,6 +947,8 @@ class Crawler:
                 "GET", url, follow_redirects=True, headers=req_headers,
             ) as resp:
                 if resp.status_code != 200:
+                    async with self._state_lock:
+                        state.resources_errored += 1
                     await self._publish_event(job_id, "SCRAPE_ERROR", {
                         "url": url,
                         "error": f"Asset GET returned HTTP {resp.status_code}",
@@ -926,6 +961,8 @@ class Crawler:
 
                 if not skip_size_check and resp_len > max_asset:
                     logger.info(f"Skipping {url}: GET-declared size {resp_len} > MAX_ASSET_SIZE")
+                    async with self._state_lock:
+                        state.resources_errored += 1
                     await self._publish_event(job_id, "SCRAPE_ERROR", {
                         "url": url,
                         "error": f"Skipped — file too large ({resp_len} bytes)",
@@ -946,6 +983,8 @@ class Crawler:
                     total += len(chunk)
                     if total > max_asset:
                         logger.info(f"Aborting {url}: streamed bytes exceeded MAX_ASSET_SIZE")
+                        async with self._state_lock:
+                            state.resources_errored += 1
                         await self._publish_event(job_id, "SCRAPE_ERROR", {
                             "url": url,
                             "error": f"Aborted — streamed bytes exceeded MAX_ASSET_SIZE ({total} bytes)",
@@ -1004,6 +1043,8 @@ class Crawler:
         except Exception as e:
             msg = f"{type(e).__name__}: {e}"
             logger.warning(f"Asset download failed for {url}: {msg}")
+            async with self._state_lock:
+                state.resources_errored += 1
             try:
                 await self._publish_event(job_id, "SCRAPE_ERROR", {
                     "url": url,
