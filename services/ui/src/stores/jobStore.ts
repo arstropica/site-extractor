@@ -109,11 +109,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
           if (typeof data.bytes_downloaded === 'number') updates.bytes_downloaded = data.bytes_downloaded
         }
         get().updateActiveJob(updates)
-        if (status === 'scraped') {
-          get().markStepCompleted(1)
-        } else if (status === 'completed') {
-          get().markStepCompleted(4)
-        }
+        // Stepper state derives from the updated activeJob via
+        // computePipelineStages — no per-status marking needed here.
       }
     }
 

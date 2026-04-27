@@ -55,7 +55,6 @@ export default function WizardPage() {
   const {
     activeJob,
     setActiveJob,
-    markStepCompleted,
     clearScrapeEvents,
     draftConfig,
     draftName,
@@ -115,14 +114,9 @@ export default function WizardPage() {
     }
     if (!jobData) return
     setActiveJob(jobData)
-
-    // Step completion marks (visual ticks in the stepper) follow status:
-    // every step at or below the status-implied stage is "complete".
-    const impliedStage = stageForJobStatus(jobData)
-    const impliedStep = STAGE_TO_INDEX[impliedStage]
-    for (let i = 0; i < impliedStep; i++) markStepCompleted(i)
-    if (jobData.status === 'completed') markStepCompleted(4)
-  }, [isNew, jobData, setActiveJob, markStepCompleted, clearScrapeEvents])
+    // Stepper visuals are now derived from `stages` (computePipelineStages
+    // over activeJob) — no per-load marking needed.
+  }, [isNew, jobData, setActiveJob, clearScrapeEvents])
 
   // Stage normalization: redirect once on mount when the URL has no stage
   // (or an invalid stage). Replace-history so the bare /job/<id> URL
@@ -158,7 +152,6 @@ export default function WizardPage() {
       const result = await jobs.create(config, name)
       const newJob = await jobs.get(result.job_id)
       setActiveJob(newJob)
-      markStepCompleted(0)
       clearScrapeEvents()
       navigate(`/job/${result.job_id}/scrape`, { replace: true })
       await jobs.startScrape(result.job_id)
@@ -180,10 +173,9 @@ export default function WizardPage() {
 
   const goToStep = useCallback(
     (step: number) => {
-      markStepCompleted(step - 1)
       goToStage(STAGES[step])
     },
-    [markStepCompleted, goToStage],
+    [goToStage],
   )
 
   const queryClient = useQueryClient()
@@ -206,10 +198,9 @@ export default function WizardPage() {
   })
 
   const handleMapperContinue = useCallback(() => {
-    markStepCompleted(3)
     goToStage('results')
     startExtractionMutation.mutate()
-  }, [markStepCompleted, goToStage, startExtractionMutation])
+  }, [goToStage, startExtractionMutation])
 
   return (
     <>
