@@ -1,0 +1,15 @@
+[project]
+name = "site-extractor"
+version = "0.1.0"
+description = "Two-phase site spider + content extraction tool (docker-compose)"
+requires-python = ">=3.11"
+
+# Runtime deps live in services/*/requirements.txt — each service container
+# installs only what it needs. This file exists so a single project-root venv
+# can run the cross-service shared tests (pytest) without pulling in every
+# service's runtime stack.
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-v --tb=short"

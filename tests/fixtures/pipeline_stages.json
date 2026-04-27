@@ -1,0 +1,358 @@
+[
+  {
+    "name": "fresh_created_no_seeds",
+    "job": {
+      "status": "created",
+      "scrape_config": {},
+      "extraction_config": null
+    },
+    "expected": {
+      "config":  {"status": "pending"},
+      "scrape":  {"status": "pending"},
+      "schema":  {"status": "pending"},
+      "mapper":  {"status": "pending"},
+      "results": {"status": "pending"}
+    }
+  },
+  {
+    "name": "created_with_seeds_only",
+    "job": {
+      "status": "created",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": null
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "pending"},
+      "schema":  {"status": "pending"},
+      "mapper":  {"status": "pending"},
+      "results": {"status": "pending"}
+    }
+  },
+  {
+    "name": "created_with_blank_seed_urls",
+    "job": {
+      "status": "created",
+      "scrape_config": {"seed_urls": ["", "   "]},
+      "extraction_config": null
+    },
+    "expected": {
+      "config":  {"status": "pending"},
+      "scrape":  {"status": "pending"}
+    }
+  },
+  {
+    "name": "scraping_in_flight",
+    "job": {
+      "status": "scraping",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": null,
+      "pages_downloaded": 5,
+      "pages_discovered": 17
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "in_progress"},
+      "schema":  {"status": "pending"},
+      "mapper":  {"status": "pending"},
+      "results": {"status": "pending"}
+    }
+  },
+  {
+    "name": "paused_treated_as_in_progress",
+    "job": {
+      "status": "paused",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": null
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "in_progress"},
+      "schema":  {"status": "pending"}
+    }
+  },
+  {
+    "name": "scraped_clean_no_extraction_config",
+    "job": {
+      "status": "scraped",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": null,
+      "pages_downloaded": 17,
+      "pages_errored": 0,
+      "resources_errored": 0
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "complete"},
+      "schema":  {"status": "pending"},
+      "mapper":  {"status": "pending"},
+      "results": {"status": "pending"}
+    }
+  },
+  {
+    "name": "scraped_with_resource_errors_only",
+    "job": {
+      "status": "scraped",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": null,
+      "pages_errored": 0,
+      "resources_errored": 67
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "warning", "message": "67 resource error(s)"},
+      "schema":  {"status": "pending"}
+    }
+  },
+  {
+    "name": "scraped_with_page_and_resource_errors",
+    "job": {
+      "status": "scraped",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": null,
+      "pages_errored": 2,
+      "resources_errored": 5
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "warning", "message": "2 page error(s), 5 resource error(s)"}
+    }
+  },
+  {
+    "name": "scraped_with_schema_only",
+    "job": {
+      "status": "scraped",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": {
+        "mode": "document",
+        "schema_id": "abc-123"
+      }
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "complete"},
+      "schema":  {"status": "complete"},
+      "mapper":  {"status": "pending"},
+      "results": {"status": "pending"}
+    }
+  },
+  {
+    "name": "scraped_schema_missing_mode",
+    "job": {
+      "status": "scraped",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": {
+        "schema_id": "abc-123"
+      }
+    },
+    "expected": {
+      "schema":  {"status": "pending"},
+      "mapper":  {"status": "pending"}
+    }
+  },
+  {
+    "name": "scraped_schema_missing_schema_id",
+    "job": {
+      "status": "scraped",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": {
+        "mode": "document"
+      }
+    },
+    "expected": {
+      "schema":  {"status": "pending"},
+      "mapper":  {"status": "pending"}
+    }
+  },
+  {
+    "name": "scraped_with_schema_and_partial_mappings",
+    "job": {
+      "status": "scraped",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": {
+        "mode": "document",
+        "schema_id": "abc-123",
+        "document": {
+          "field_mappings": [
+            {"field_path": "time", "selector": ".time"}
+          ]
+        }
+      }
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "complete"},
+      "schema":  {"status": "complete"},
+      "mapper":  {"status": "complete"},
+      "results": {"status": "pending"}
+    }
+  },
+  {
+    "name": "scraped_with_mapping_missing_selector",
+    "job": {
+      "status": "scraped",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": {
+        "mode": "document",
+        "schema_id": "abc-123",
+        "document": {
+          "field_mappings": [
+            {"field_path": "time"}
+          ]
+        }
+      }
+    },
+    "expected": {
+      "schema":  {"status": "complete"},
+      "mapper":  {"status": "pending"}
+    }
+  },
+  {
+    "name": "scraped_with_mapping_via_url_regex",
+    "job": {
+      "status": "scraped",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": {
+        "mode": "document",
+        "schema_id": "abc-123",
+        "document": {
+          "field_mappings": [
+            {"field_path": "week", "url_regex": "weekNumber=(\\d+)"}
+          ]
+        }
+      }
+    },
+    "expected": {
+      "schema":  {"status": "complete"},
+      "mapper":  {"status": "complete"}
+    }
+  },
+  {
+    "name": "extracting_in_flight",
+    "job": {
+      "status": "extracting",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": {
+        "mode": "document",
+        "schema_id": "abc-123",
+        "document": {"field_mappings": [{"field_path": "x", "selector": "p"}]}
+      }
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "complete"},
+      "schema":  {"status": "complete"},
+      "mapper":  {"status": "complete"},
+      "results": {"status": "in_progress"}
+    }
+  },
+  {
+    "name": "completed_clean",
+    "job": {
+      "status": "completed",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": {
+        "mode": "document",
+        "schema_id": "abc-123",
+        "document": {"field_mappings": [{"field_path": "x", "selector": "p"}]}
+      }
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "complete"},
+      "schema":  {"status": "complete"},
+      "mapper":  {"status": "complete"},
+      "results": {"status": "complete"}
+    }
+  },
+  {
+    "name": "completed_with_scrape_warnings",
+    "job": {
+      "status": "completed",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": {
+        "mode": "document",
+        "schema_id": "abc-123",
+        "document": {"field_mappings": [{"field_path": "x", "selector": "p"}]}
+      },
+      "resources_errored": 67
+    },
+    "expected": {
+      "scrape":  {"status": "warning", "message": "67 resource error(s)"},
+      "results": {"status": "complete"}
+    }
+  },
+  {
+    "name": "failed_at_scrape",
+    "job": {
+      "status": "failed",
+      "failed_stage": "scrape",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": null,
+      "error_message": "Scraper service unreachable"
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "failed", "message": "Scraper service unreachable"},
+      "schema":  {"status": "pending"},
+      "results": {"status": "pending"}
+    }
+  },
+  {
+    "name": "failed_at_extract",
+    "job": {
+      "status": "failed",
+      "failed_stage": "extract",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": {
+        "mode": "document",
+        "schema_id": "abc-123",
+        "document": {"field_mappings": [{"field_path": "x", "selector": "p"}]}
+      },
+      "error_message": "Selector .nope matched 0 elements"
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "complete"},
+      "schema":  {"status": "complete"},
+      "mapper":  {"status": "complete"},
+      "results": {"status": "failed", "message": "Selector .nope matched 0 elements"}
+    }
+  },
+  {
+    "name": "failed_legacy_no_failed_stage_assumes_scrape",
+    "job": {
+      "status": "failed",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": null,
+      "error_message": "Network timeout"
+    },
+    "expected": {
+      "scrape":  {"status": "failed", "message": "Network timeout"}
+    }
+  },
+  {
+    "name": "cancelled_treated_as_scrape_failed",
+    "job": {
+      "status": "cancelled",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": null
+    },
+    "expected": {
+      "scrape":  {"status": "failed", "message": "Cancelled by user"},
+      "results": {"status": "pending"}
+    }
+  },
+  {
+    "name": "unknown_status_falls_back_to_pending",
+    "job": {
+      "status": "weird-new-status",
+      "scrape_config": {"seed_urls": ["https://x/"]},
+      "extraction_config": null
+    },
+    "expected": {
+      "config":  {"status": "complete"},
+      "scrape":  {"status": "pending"}
+    }
+  }
+]
