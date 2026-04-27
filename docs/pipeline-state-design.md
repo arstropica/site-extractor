@@ -250,6 +250,40 @@ Per-step verification at the bottom of each migration step:
 
 ---
 
+## Step 10 audit — surviving client-side pipeline writes (with rationale)
+
+After steps 1–9 the only client-side writes that touch pipeline-shaped fields are the categories below. Each was kept after weighing "stricter purity" against UX. None are session-scoped accumulators of the kind step 1–4 removed; all are either (a) caches of server-confirmed state or (b) optimistic UX updates after a server-validated action.
+
+### 1. Cache writes after a server fetch
+
+`setActiveJob(jobData)` calls in `WizardPage`, `ResultsStep` after `jobs.get` / `extraction.start` return. These mirror the server response into the store so non-component code (e.g. `handleWSEvent`) can see it. Equivalent to react-query cache updates; no client opinion in play.
+
+### 2. Cache writes after a PATCH succeeds
+
+`updateActiveJob({ extraction_config })` in `ContentMapperStep` and `SchemaBuilderStep` after `jobs.update` returns. The server has already accepted and persisted the value; the local mirror is just a redundant cache prefill avoiding a follow-up GET.
+
+### 3. Server-pushed deltas applied via WebSocket
+
+`handleWSEvent` in `jobStore` writes `pages_*`, `resources_*`, `bytes_downloaded`, `progress`, and `status` from incoming WS events. The WS event IS the server's authoritative notification. The client just merges the delta into its cached `activeJob`.
+
+### 4. Optimistic status updates after a server action returns 200
+
+`ScrapeMonitorStep` calls `updateActiveJob({ status })` after `jobsApi.pause()` / `cancel()` / `startScrape()` return success. The server's state-machine has already validated and applied the transition by the time this code runs (it returned 200). The store write is a UX optimization — the stepper updates instantly rather than waiting up to ~1s for the WS broadcast to round-trip. The WS event arrives shortly after with the same value (no-op merge); if the WS is offline, the next react-query refetch overwrites with truth.
+
+A stricter version would drop these and rely solely on WS + react-query refetch. Visible cost: brief lag between click and stepper update. Visible benefit of removal: zero. The structural bug class (monotonic accumulators that never reset) is unrelated to this category and is already gone. Kept.
+
+### Confirmed clean
+
+- No `useState`-based pipeline accumulators in any wizard step. All component-local state is form-edit buffers (schema fields mid-edit, picker mode, sort/filter selections).
+- No remaining `markStepCompleted`-style functions or accumulator sets in any store.
+- `STAGES` / `STAGE_TO_INDEX` / `isStage` in `WizardPage` are URL-routing helpers, not pipeline state.
+- `PageTree` reads `page.status` (per-page download status, a different domain than job-level pipeline status).
+- `useWebSocket.connected` is transport state, not pipeline state.
+
+The leak class is structurally impossible going forward: nothing in the client owns "what stage has been finished" — that's pure derivation over the server's job record via `computePipelineStages`.
+
+---
+
 ## Out of scope (deliberately)
 
 - Full architectural rewrite à la reaction-maker-2 (event sourcing, CQRS, projection workers).
