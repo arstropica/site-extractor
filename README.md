@@ -4,6 +4,8 @@
 
 A self-hosted Docker Compose application for crawling websites and extracting structured data from the captured content. Wizard-driven UI guides users through scraper configuration, schema definition, point-and-click content mapping, and result export — with real-time progress, resumable jobs, and a boundary-scoped extraction model that handles complex nested layouts.
 
+> **For developers / agents working on the code**: see `CLAUDE.md` for the architectural contracts (pipeline state derivation, status state-machine, client-store rules). The README covers operations and usage; CLAUDE.md covers what must hold to keep the system coherent.
+
 ---
 
 ## Features
@@ -135,12 +137,14 @@ Most users will drive the wizard at `http://localhost:12000/` rather than the AP
 
 **4 services** (all coordinated via `docker-compose.yml`):
 
-- **extractor-gateway** — FastAPI orchestrator. Hosts REST endpoints, WebSocket relay, SQLite (jobs, schemas, page index, resource index), encrypted credential store, and the compiled React SPA as static assets.
-- **scraper-service** — Crawler with two modes (httpx / Playwright Chromium). Sliding-window async dispatcher, per-domain + global semaphores, HEAD-first asset probing with streaming size guard, Redis lists for page/resource sync to the gateway.
-- **extraction-service** — Boundary-scoped CSS extraction engine, URL-pattern filtering, image download, and `merge_by` cross-page record consolidation.
-- **redis** — Pub/sub channels (`scraper_events`, `extraction_events`) and lists (`scraper:pages`, `scraper:resources`) used by the gateway's consumer to sync into SQLite.
+- **extractor-gateway** — FastAPI orchestrator. Sole owner of SQLite (jobs, schemas, page index, resource index, extraction results). Hosts REST endpoints, WebSocket relay to clients, encrypted credential store, the explicit job-status state-machine validator, and the compiled React SPA as static assets.
+- **scraper-service** — Crawler with two modes (httpx / Playwright Chromium). Sliding-window async dispatcher, per-domain + global semaphores, HEAD-first asset probing with streaming size guard. Posts page/resource records and final-state updates to the gateway over HTTP (`/api/internal/*`); the scraper never touches the database directly.
+- **extraction-service** — Boundary-scoped CSS extraction engine, URL-pattern filtering, image download, and `merge_by` cross-page record consolidation. Reads the canonical page list from the gateway over HTTP.
+- **redis** — Pub/sub channels (`scraper_events`, `extraction_events`) for cross-service progress events that the gateway relays to WebSocket clients, plus per-job pause/cancel signal keys.
 
 The gateway is the only public service; the scraper and extraction services are reachable only on the internal Docker network.
+
+**Pipeline state contract** — Job status changes through dedicated endpoints (`/start-scrape`, `/pause`, `/cancel`, `/extraction/{id}/start`); the gateway validates every transition against an explicit graph (`shared/state_machine.py`). PATCH does NOT accept `status`. Failure is partitioned by stage (`failed_stage` ∈ `scrape | extract`) so the wizard marks the right step red. See `CLAUDE.md` for the full architectural contract — read it before non-trivial changes.
 
 ---
 
@@ -378,6 +382,10 @@ Set `DOCKER_PORT=<free-port>` in `.env` and `docker compose up -d`.
 - [x] Encrypted credential storage (Fernet, fail-loudly)
 - [x] `merge_by` + `url_regex` cross-page record consolidation
 - [x] JSON / CSV export
+- [x] Server-authoritative pipeline state with explicit transition graph (gateway rejects illegal transitions; PATCH does not accept `status`)
+- [x] Wizard step indicators derived from the job record (no client-side accumulator); cloned and re-run jobs reflect their actual state, not the previous session's
+- [x] Failure attribution — `failed_stage` ∈ `scrape | extract` distinguishes which step needs attention
+- [x] Cold clone with full extraction-config carry-over (`POST /api/jobs/{id}/clone` with optional `name_override`)
 
 ### v2 (Planned)
 
