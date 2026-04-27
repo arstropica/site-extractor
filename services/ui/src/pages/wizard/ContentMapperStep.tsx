@@ -260,13 +260,14 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
       file_patterns: mode === 'file' ? filePatterns : [],
     }
 
-    // Save extraction config to the job
+    // Save extraction config to the job. Do NOT change `status` — saving
+    // mapper config is a UI activity, not a pipeline transition. The job
+    // remains `scraped` until extraction actually starts.
     await jobsApi.update(jobId, {
       extraction_config: config,
       extraction_mode: mode,
-      status: 'mapping',
     })
-    updateActiveJob({ extraction_config: config, status: 'mapping' as any })
+    updateActiveJob({ extraction_config: config })
     onContinue()
   }
 

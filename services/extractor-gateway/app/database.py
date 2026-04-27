@@ -48,6 +48,7 @@ class Database:
                 resources_downloaded INTEGER DEFAULT 0,
                 bytes_downloaded INTEGER DEFAULT 0,
                 error_message TEXT,
+                failed_stage TEXT,
                 created_at TEXT NOT NULL,
                 started_at TEXT,
                 scraped_at TEXT,
@@ -142,6 +143,26 @@ class Database:
                 await self._db.commit()
             except Exception:
                 pass  # column already exists
+
+        # Migration: add failed_stage column. Distinguishes "scrape failed"
+        # from "extract failed" so the wizard can mark the right step red.
+        try:
+            await self._db.execute("ALTER TABLE jobs ADD COLUMN failed_stage TEXT")
+            await self._db.commit()
+        except Exception:
+            pass  # column already exists
+
+        # One-shot data migration: drop the `mapping` status, which was an
+        # alias for "scraped + user is editing the mapper UI" — UI activity
+        # never warranted a distinct job status. Any row still holding it is
+        # converted to `scraped` (the underlying state).
+        try:
+            await self._db.execute(
+                "UPDATE jobs SET status = 'scraped' WHERE status = 'mapping'"
+            )
+            await self._db.commit()
+        except Exception:
+            pass
 
     # ── Jobs ──────────────────────────────────────────────────────────────
 
@@ -267,7 +288,7 @@ class Database:
                 progress = 0.0, progress_message = '',
                 pages_discovered = 0, pages_downloaded = 0, pages_errored = 0,
                 resources_discovered = 0, resources_downloaded = 0, resources_errored = 0,
-                bytes_downloaded = 0, error_message = NULL,
+                bytes_downloaded = 0, error_message = NULL, failed_stage = NULL,
                 scraped_at = NULL, completed_at = NULL
                WHERE id = ?""",
             (job_id,),

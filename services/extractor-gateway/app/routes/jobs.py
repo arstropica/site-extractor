@@ -220,7 +220,11 @@ async def start_scrape(job_id: str, request: Request):
     try:
         decrypted_config = decrypt_scrape_config(job["scrape_config"])
     except CredentialDecryptError as e:
-        await db.update_job(job_id, {"status": "failed", "error_message": str(e)})
+        await db.update_job(job_id, {
+            "status": "failed",
+            "error_message": str(e),
+            "failed_stage": "scrape",
+        })
         raise HTTPException(status_code=400, detail=str(e))
 
     # Forward to scraper service
@@ -241,6 +245,8 @@ async def start_scrape(job_id: str, request: Request):
     await db.update_job(job_id, {
         "status": "scraping",
         "started_at": datetime.utcnow().isoformat(),
+        # Clear any prior failure attribution; the job is being retried.
+        "failed_stage": None,
     })
 
     await ws_manager.broadcast_event("SCRAPE_STATUS", job_id, {"status": "scraping"})

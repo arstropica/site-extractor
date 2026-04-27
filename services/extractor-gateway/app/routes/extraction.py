@@ -23,7 +23,12 @@ async def start_extraction(job_id: str, request: Request):
     job = await db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job["status"] not in ("scraped", "completed", "mapping"):
+    # `mapping` was an alias for "scraped + user is editing the mapper UI"
+    # — that UI activity never warranted a distinct job status, so the
+    # status was dropped. `failed` is intentionally allowed: a previously
+    # failed extraction can be retried in place once the user fixes the
+    # config (no need to re-scrape).
+    if job["status"] not in ("scraped", "completed", "failed"):
         raise HTTPException(status_code=400, detail=f"Cannot extract from status '{job['status']}'")
     if not job.get("extraction_config"):
         raise HTTPException(status_code=400, detail="No extraction config set on job")
@@ -31,7 +36,12 @@ async def start_extraction(job_id: str, request: Request):
     # Write page index for the extraction service to consume
     await _write_page_index(job_id)
 
-    await db.update_job(job_id, {"status": "extracting"})
+    await db.update_job(job_id, {
+        "status": "extracting",
+        # Clear any prior failure attribution; the job is being retried.
+        "failed_stage": None,
+        "error_message": None,
+    })
 
     # Load schema fields if schema_id is set
     extraction_config = job["extraction_config"]
@@ -63,12 +73,20 @@ async def start_extraction(job_id: str, request: Request):
                 except Exception:
                     upstream_detail = resp.text[:500]
                 msg = f"Extraction service {resp.status_code}: {upstream_detail}"
-                await db.update_job(job_id, {"status": "failed", "error_message": msg})
+                await db.update_job(job_id, {
+                    "status": "failed",
+                    "error_message": msg,
+                    "failed_stage": "extract",
+                })
                 raise HTTPException(status_code=502, detail=msg)
             result = resp.json()
     except httpx.HTTPError as e:
         msg = f"Extraction service unreachable: {type(e).__name__}: {e}"
-        await db.update_job(job_id, {"status": "failed", "error_message": msg})
+        await db.update_job(job_id, {
+            "status": "failed",
+            "error_message": msg,
+            "failed_stage": "extract",
+        })
         raise HTTPException(status_code=502, detail=msg)
 
     # Persist results to SQLite

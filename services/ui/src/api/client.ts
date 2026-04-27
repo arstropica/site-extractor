@@ -109,7 +109,9 @@ export const system = {
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-export type JobStatus = 'created' | 'scraping' | 'scraped' | 'mapping' | 'extracting' | 'completed' | 'failed' | 'paused' | 'cancelled'
+export type JobStatus = 'created' | 'scraping' | 'scraped' | 'extracting' | 'completed' | 'failed' | 'paused' | 'cancelled'
+
+export type FailedStage = 'scrape' | 'extract'
 export type ExtractionMode = 'document' | 'file'
 export type CrawlMode = 'http' | 'browser'
 export type AuthMethod = 'none' | 'basic' | 'bearer' | 'cookie' | 'browser_session'
@@ -241,6 +243,7 @@ export interface JobDetail {
   resources_errored: number
   bytes_downloaded: number
   error_message?: string
+  failed_stage?: FailedStage | null
   created_at: string
   started_at?: string
   scraped_at?: string

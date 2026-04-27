@@ -18,12 +18,19 @@ class JobStatus(str, Enum):
     CREATED = "created"
     SCRAPING = "scraping"
     SCRAPED = "scraped"
-    MAPPING = "mapping"
     EXTRACTING = "extracting"
     COMPLETED = "completed"
     FAILED = "failed"
     PAUSED = "paused"
     CANCELLED = "cancelled"
+
+
+class FailedStage(str, Enum):
+    """Set on jobs whose status is `failed` to attribute the failure to a
+    specific pipeline stage. Per-URL errors do NOT promote to job-level
+    failure; this is reserved for whole-stage failures."""
+    SCRAPE = "scrape"
+    EXTRACT = "extract"
 
 
 class ExtractionMode(str, Enum):
@@ -236,6 +243,7 @@ class Job(BaseModel):
     resources_errored: int = 0
     bytes_downloaded: int = 0
     error_message: Optional[str] = None
+    failed_stage: Optional[FailedStage] = None
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     started_at: Optional[datetime] = None
@@ -273,6 +281,7 @@ class JobStatusResponse(BaseModel):
     resources_errored: int = 0
     bytes_downloaded: int
     error_message: Optional[str] = None
+    failed_stage: Optional[FailedStage] = None
     created_at: datetime
     started_at: Optional[datetime] = None
     scraped_at: Optional[datetime] = None

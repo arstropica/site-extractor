@@ -82,6 +82,7 @@ async def lifespan(app: FastAPI):
                             await db.update_job(job_id, {
                                 "status": "failed",
                                 "error_message": data.get("error", "Unknown error"),
+                                "failed_stage": "scrape",
                             })
                         elif status == "paused":
                             await db.update_job(job_id, {"status": "paused"})
@@ -97,6 +98,7 @@ async def lifespan(app: FastAPI):
                             await db.update_job(job_id, {
                                 "status": "failed",
                                 "error_message": data.get("error", "Extraction failed"),
+                                "failed_stage": "extract",
                             })
 
                 except (json.JSONDecodeError, Exception) as e:
