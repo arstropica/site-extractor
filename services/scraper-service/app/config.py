@@ -9,7 +9,7 @@ class Settings:
     # Gateway URL — used for posting page/resource records and final-state
     # updates to the gateway's /api/internal/* endpoints. The gateway is the
     # sole owner of SQLite; the scraper is an HTTP producer.
-    GATEWAY_URL: str = os.getenv("GATEWAY_URL", "http://api-gateway:8000")
+    GATEWAY_URL: str = os.getenv("GATEWAY_URL", "http://extractor-gateway:8000")
     MAX_DOWNLOAD_SIZE: int = int(os.getenv("MAX_DOWNLOAD_SIZE", "524288000"))
     HTTP_PROXY: str = os.getenv("HTTP_PROXY", "")
     HTTPS_PROXY: str = os.getenv("HTTPS_PROXY", "")

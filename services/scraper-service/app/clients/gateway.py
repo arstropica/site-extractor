@@ -1,4 +1,4 @@
-"""HTTP client for the api-gateway's internal write endpoints.
+"""HTTP client for the extractor-gateway's internal write endpoints.
 
 The scraper is an HTTP producer — it never touches the database
 directly. Pages, resources, and final-state updates all flow through

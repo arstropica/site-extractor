@@ -115,7 +115,7 @@ Most users will drive the wizard at `http://localhost:12000/` rather than the AP
          │ HTTP / WebSocket
          ▼
 ┌──────────────────┐
-│   api-gateway    │ :12000 ← REST + WS hub, serves React SPA
+│ extractor-gateway│ :12000 ← REST + WS hub, serves React SPA
 │   (FastAPI)      │         SQLite persistence, encrypted credentials
 └────┬─────────┬───┘
      │         │
@@ -135,7 +135,7 @@ Most users will drive the wizard at `http://localhost:12000/` rather than the AP
 
 **4 services** (all coordinated via `docker-compose.yml`):
 
-- **api-gateway** — FastAPI orchestrator. Hosts REST endpoints, WebSocket relay, SQLite (jobs, schemas, page index, resource index), encrypted credential store, and the compiled React SPA as static assets.
+- **extractor-gateway** — FastAPI orchestrator. Hosts REST endpoints, WebSocket relay, SQLite (jobs, schemas, page index, resource index), encrypted credential store, and the compiled React SPA as static assets.
 - **scraper-service** — Crawler with two modes (httpx / Playwright Chromium). Sliding-window async dispatcher, per-domain + global semaphores, HEAD-first asset probing with streaming size guard, Redis lists for page/resource sync to the gateway.
 - **extraction-service** — Boundary-scoped CSS extraction engine, URL-pattern filtering, image download, and `merge_by` cross-page record consolidation.
 - **redis** — Pub/sub channels (`scraper_events`, `extraction_events`) and lists (`scraper:pages`, `scraper:resources`) used by the gateway's consumer to sync into SQLite.
@@ -267,14 +267,14 @@ All variables are read from the `.env` file at the project root (or the host env
 
 | Name                       | Description                                                                                                                                                                                                                                            | Default                          |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
-| `DOCKER_PORT`              | Host port published by `api-gateway`; UI + REST + WS are all served from this port.                                                                                                                                                                    | `12000`                          |
+| `DOCKER_PORT`              | Host port published by `extractor-gateway`; UI + REST + WS are all served from this port.                                                                                                                                                                    | `12000`                          |
 | `DOCKER_NETWORK`           | Name of the external Docker bridge network all services attach to. Declared `external: true` in compose, so create it once with `docker network create $DOCKER_NETWORK` (or reuse one from another stack to share networking).                         | `extractor_network`              |
 | `DATA_PATH`                | Host path bind-mounted to `/data` inside every service. Holds scraped pages, downloaded assets, and the SQLite database. Created on first run if it does not exist. Use an absolute path for clarity in production.                                    | `./data`                         |
 | `REDIS_URL`                | Redis connection URL used by every service for pub/sub and list-based sync.                                                                                                                                                                            | `redis://redis:6379`             |
-| `DATABASE_PATH`            | SQLite database file path inside the api-gateway container.                                                                                                                                                                                            | `/data/extractor.db`             |
+| `DATABASE_PATH`            | SQLite database file path inside the extractor-gateway container.                                                                                                                                                                                            | `/data/extractor.db`             |
 | `DATA_DIR`                 | Root directory inside each container for scraped pages, downloaded assets, and the database. Mapped to the host via `DATA_PATH`.                                                                                                                       | `/data`                          |
-| `SCRAPER_SERVICE_URL`      | Internal URL the api-gateway uses to reach the scraper service.                                                                                                                                                                                        | `http://scraper-service:8001`    |
-| `EXTRACTION_SERVICE_URL`   | Internal URL the api-gateway uses to reach the extraction service.                                                                                                                                                                                     | `http://extraction-service:8002` |
+| `SCRAPER_SERVICE_URL`      | Internal URL the extractor-gateway uses to reach the scraper service.                                                                                                                                                                                        | `http://scraper-service:8001`    |
+| `EXTRACTION_SERVICE_URL`   | Internal URL the extractor-gateway uses to reach the extraction service.                                                                                                                                                                                     | `http://extraction-service:8002` |
 | `ENCRYPTION_KEY`           | Secret used to derive a Fernet key for encrypting stored job credentials (basic auth, bearer tokens, cookies). **Change in production.** Rotating this key invalidates all stored credentials and the gateway will fail loudly when it cannot decrypt. | `change-me-in-production`        |
 | `MAX_DOWNLOAD_SIZE`        | Total bytes a single job is allowed to download across all pages and assets. Per-job override available via `scrape_config.max_download_size`. Units: bytes.                                                                                           | `524288000` (500 MB)             |
 | `MAX_ASSET_SIZE`           | Per-asset size cap. Files larger than this are skipped without downloading (HEAD probe first; falls back to streaming guard). Units: bytes.                                                                                                            | `52428800` (50 MB)               |
@@ -304,12 +304,12 @@ Defaults are defined in `services/shared/models.py` (`ScrapeConfig`) and `DEFAUL
 docker compose up -d --build
 
 # Tail logs
-docker compose logs -f api-gateway
+docker compose logs -f extractor-gateway
 docker compose logs -f scraper-service
 docker compose logs -f extraction-service
 
 # Rebuild a single service after code changes
-docker compose up -d --build api-gateway
+docker compose up -d --build extractor-gateway
 
 # Inspect Redis
 docker compose exec redis redis-cli
@@ -318,7 +318,7 @@ docker compose exec redis redis-cli
 > SUBSCRIBE scraper_events
 
 # Inspect SQLite
-docker compose exec api-gateway sqlite3 /data/extractor.db
+docker compose exec extractor-gateway sqlite3 /data/extractor.db
 sqlite> .tables
 sqlite> SELECT id, name, status, pages_downloaded FROM jobs ORDER BY created_at DESC LIMIT 10;
 
@@ -336,7 +336,7 @@ npm run dev
 
 ```bash
 docker compose ps
-docker compose logs api-gateway --tail 100
+docker compose logs extractor-gateway --tail 100
 docker compose logs scraper-service --tail 100
 ```
 

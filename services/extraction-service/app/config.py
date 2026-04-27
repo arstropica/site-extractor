@@ -9,7 +9,7 @@ class Settings:
     # Gateway URL — used to fetch the authoritative page / resource list
     # from SQLite. Disk holds the blobs records reference; the gateway
     # holds the records.
-    GATEWAY_URL: str = os.getenv("GATEWAY_URL", "http://api-gateway:8000")
+    GATEWAY_URL: str = os.getenv("GATEWAY_URL", "http://extractor-gateway:8000")
 
 
 settings = Settings()

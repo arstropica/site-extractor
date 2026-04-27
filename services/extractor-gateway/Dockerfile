@@ -17,11 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install Python dependencies
-COPY services/api-gateway/requirements.txt .
+COPY services/extractor-gateway/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY services/api-gateway/app/ ./app/
+COPY services/extractor-gateway/app/ ./app/
 COPY services/shared/ ./shared/
 
 # Copy UI build output

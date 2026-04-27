@@ -12,7 +12,7 @@ A site spider and content extraction tool delivered as a Docker Compose service.
 
 | Service | Role | Port |
 |---|---|---|
-| `api-gateway` | REST API + WebSocket hub + serves React UI + orchestration | 12000 |
+| `extractor-gateway` | REST API + WebSocket hub + serves React UI + orchestration | 12000 |
 | `scraper-service` | HTTP and Playwright/Chromium crawling engine | 12001 (internal) |
 | `extraction-service` | CSS selector execution, boundary-scoped extraction | 12002 (internal) |
 | `redis` | Job state, pub/sub for real-time progress | 6379 (internal) |

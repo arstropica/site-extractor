@@ -13,10 +13,10 @@ services:
       retries: 3
     restart: unless-stopped
 
-  api-gateway:
+  extractor-gateway:
     build:
       context: .
-      dockerfile: services/api-gateway/Dockerfile
+      dockerfile: services/extractor-gateway/Dockerfile
     ports: ["${DOCKER_PORT:-12000}:8000"]
     environment:
       - REDIS_URL=redis://redis:6379
@@ -51,7 +51,7 @@ services:
       - MAX_DOWNLOAD_SIZE=${MAX_DOWNLOAD_SIZE:-524288000}
       - MAX_ASSET_SIZE=${MAX_ASSET_SIZE:-52428800}
       - SCRAPER_RETRY_LIMIT=${SCRAPER_RETRY_LIMIT:-1}
-      - GATEWAY_URL=http://api-gateway:8000
+      - GATEWAY_URL=http://extractor-gateway:8000
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
     volumes:
@@ -77,7 +77,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - DATA_DIR=/data
-      - GATEWAY_URL=http://api-gateway:8000
+      - GATEWAY_URL=http://extractor-gateway:8000
     volumes:
       - ${DATA_PATH:-./data}:/data
     networks:

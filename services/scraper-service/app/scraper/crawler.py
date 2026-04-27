@@ -104,7 +104,7 @@ class Crawler:
     def __init__(self, redis_client, gateway_client=None, db_conn=None):
         self.redis = redis_client
         # GatewayClient — page/resource/job-state writes go through here as
-        # HTTP POSTs to the api-gateway (the sole DB owner). The retry-with-
+        # HTTP POSTs to the extractor-gateway (the sole DB owner). The retry-with-
         # backoff baked into the client provides at-least-once delivery.
         self.gateway = gateway_client
         self.db = db_conn
