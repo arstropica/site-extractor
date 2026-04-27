@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import { useEffect, useMemo, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { jobs, extraction, type JobDetail, type ScrapeConfig } from '@/api/client'
@@ -39,13 +39,7 @@ export default function WizardPage() {
   const navigate = useNavigate()
   const isNew = jobId === 'new'
 
-  const {
-    activeJob,
-    setActiveJob,
-    draftConfig,
-    draftName,
-    setDraft,
-  } = useJobStore()
+  const { activeJob, setActiveJob } = useJobStore()
 
   // Pipeline-stage status is a pure projection of the active job record.
   // useMemo just keeps the object identity stable across renders so the
@@ -64,18 +58,6 @@ export default function WizardPage() {
     },
     [jobId, navigate],
   )
-
-  // Snapshot the draft config (set by HistoryPage's clone button) at mount,
-  // then clear it from the store so it doesn't leak into a later /job/new
-  // navigation. Lazy useState init captures the value before any re-render
-  // can wipe it.
-  const [initialDraft] = useState(() =>
-    isNew ? { config: draftConfig, name: draftName } : { config: null, name: null },
-  )
-  useEffect(() => {
-    if (isNew && (draftConfig || draftName)) setDraft(null, null)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
   // Load existing job
   const { data: jobData } = useQuery({
@@ -253,8 +235,8 @@ export default function WizardPage() {
               // server config when it arrives.
               key={isNew ? 'new' : (activeJob?.id ?? 'loading')}
               onSubmit={(config, name) => createAndStartMutation.mutate({ config, name })}
-              initialConfig={isNew ? (initialDraft.config ?? undefined) : activeJob?.scrape_config}
-              initialName={isNew ? (initialDraft.name ?? '') : (activeJob?.name ?? '')}
+              initialConfig={isNew ? undefined : activeJob?.scrape_config}
+              initialName={isNew ? '' : (activeJob?.name ?? '')}
               isLoading={createAndStartMutation.isPending}
               readOnly={!isNew && !!activeJob && activeJob.status !== 'created'}
             />

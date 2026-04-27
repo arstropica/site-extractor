@@ -36,12 +36,18 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
     )
   }
 
-  const isComplete = activeJob.status === 'scraped'
+  const isCreated = activeJob.status === 'created'
+  const isScraped = activeJob.status === 'scraped'
+  const isCompleted = activeJob.status === 'completed'
   const isFailed = activeJob.status === 'failed'
   const isRunning = activeJob.status === 'scraping'
   const isPaused = activeJob.status === 'paused'
   const isCancelled = activeJob.status === 'cancelled'
-  const canRerun = isComplete || isFailed || isCancelled
+  // `completed` is included because completed → scraping is a legal
+  // transition (re-scrape after the full pipeline ran). The server's
+  // start_scrape already accepts it; the gateway clears scrape data on
+  // each non-resume start.
+  const canRerun = isScraped || isCompleted || isFailed || isCancelled
 
   const totalDiscovered = (activeJob.pages_discovered ?? 0) + (activeJob.resources_discovered ?? 0)
   const totalDownloaded = (activeJob.pages_downloaded ?? 0) + (activeJob.resources_downloaded ?? 0)
@@ -56,6 +62,11 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
   }
 
   const handleResume = async () => {
+    await jobsApi.startScrape(activeJob.id)
+    updateActiveJob({ status: 'scraping' })
+  }
+
+  const handleStart = async () => {
     await jobsApi.startScrape(activeJob.id)
     updateActiveJob({ status: 'scraping' })
   }
@@ -86,7 +97,7 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
         <div className="bg-base-200/50 rounded-xl p-4">
           <p className="text-xs text-base-content/40 uppercase tracking-wider">Status</p>
           <p className={`text-lg font-semibold mt-1 ${
-            isComplete ? 'text-success' : isFailed ? 'text-error' : isRunning ? 'text-info' : isPaused ? 'text-warning' : ''
+            isScraped ? 'text-success' : isFailed ? 'text-error' : isRunning ? 'text-info' : isPaused ? 'text-warning' : ''
           }`}>
             {activeJob.status}
           </p>
@@ -133,7 +144,7 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
         <div className="h-2 w-full bg-base-300/50 rounded-full overflow-hidden">
           <div
             className={`h-full rounded-full transition-all duration-500 ${
-              isComplete ? 'bg-success' : isFailed ? 'bg-error' : isPaused ? 'bg-warning' : 'bg-primary'
+              isScraped ? 'bg-success' : isFailed ? 'bg-error' : isPaused ? 'bg-warning' : 'bg-primary'
             }`}
             style={{ width: `${progress}%` }}
           />
@@ -158,6 +169,14 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
           <button className="btn btn-sm btn-ghost text-error gap-1" onClick={handleCancel}>
             <span className="icon-[tabler--x] size-4" />
             Cancel
+          </button>
+        </div>
+      )}
+      {isCreated && (
+        <div className="flex gap-2">
+          <button className="btn btn-sm btn-primary gap-1" onClick={handleStart}>
+            <span className="icon-[tabler--player-play] size-4" />
+            Start Scrape
           </button>
         </div>
       )}
@@ -242,7 +261,7 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
       </div>
 
       {/* Continue */}
-      {isComplete && (
+      {isScraped && (
         <div className="flex justify-end pt-2">
           <button className="btn btn-primary gap-2" onClick={onContinue}>
             Scraping Complete — Continue

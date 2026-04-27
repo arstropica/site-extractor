@@ -4,13 +4,11 @@ import { useNavigate } from 'react-router-dom'
 import * as Dialog from '@radix-ui/react-dialog'
 import { jobs, type Job } from '@/api/client'
 import { useToast } from '@/components/Toaster'
-import { useJobStore } from '@/stores/jobStore'
 
 const statusConfig: Record<string, { icon: string; badge: string }> = {
   created: { icon: 'icon-[tabler--circle-dot]', badge: 'badge-neutral' },
   scraping: { icon: 'icon-[tabler--loader-2]', badge: 'badge-info' },
   scraped: { icon: 'icon-[tabler--circle-check]', badge: 'badge-accent' },
-  mapping: { icon: 'icon-[tabler--edit]', badge: 'badge-accent' },
   extracting: { icon: 'icon-[tabler--loader-2]', badge: 'badge-warning' },
   completed: { icon: 'icon-[tabler--circle-check]', badge: 'badge-success' },
   failed: { icon: 'icon-[tabler--circle-x]', badge: 'badge-error' },
@@ -69,17 +67,17 @@ export default function HistoryPage() {
 
   const queryClient = useQueryClient()
   const toast = useToast()
-  const setDraft = useJobStore((s) => s.setDraft)
 
-  // Clone is purely client-side: fetch the source job (gateway decrypts auth
-  // for us), stash the config + name in the draft slot, and route the user
-  // to /job/new. No DB row exists until they hit Start Scrape on the wizard.
+  // Clone via the server endpoint — copies scrape_config + extraction_config
+  // + extraction_mode + name into a fresh `created` job. Returns the full
+  // job record so we can navigate without a follow-up GET. Lands on the
+  // wizard's "where do I belong" router (nextStageForJob), which sends a
+  // freshly-cloned job with seeds to /scrape.
   const cloneMutation = useMutation({
-    mutationFn: (id: string) => jobs.get(id),
-    onSuccess: (src) => {
-      const baseName = src.name?.trim() || `Job ${src.id.slice(0, 8)}`
-      setDraft(src.scrape_config, `${baseName} (copy)`)
-      navigate('/job/new')
+    mutationFn: (id: string) => jobs.clone(id),
+    onSuccess: (newJob) => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] })
+      navigate(`/job/${newJob.id}`)
     },
     onError: (e) => toast.error('Clone failed', e instanceof Error ? e.message : String(e)),
   })

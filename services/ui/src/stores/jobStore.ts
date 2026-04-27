@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { JobDetail, ScrapeConfig, WSEvent } from '@/api/client'
+import type { JobDetail, WSEvent } from '@/api/client'
 
 interface ScrapeEvent {
   type: string
@@ -12,12 +12,6 @@ interface JobStore {
   activeJob: JobDetail | null
   setActiveJob: (job: JobDetail | null) => void
   updateActiveJob: (updates: Partial<JobDetail>) => void
-
-  // Draft config used to prefill /job/new (e.g., from a "clone" click in
-  // history). Consumed and cleared by the wizard on mount.
-  draftConfig: ScrapeConfig | null
-  draftName: string | null
-  setDraft: (config: ScrapeConfig | null, name: string | null) => void
 
   // Real-time scrape events. Cleared automatically by setActiveJob when
   // the job id changes — no explicit clear needed.
@@ -45,10 +39,6 @@ export const useJobStore = create<JobStore>((set, get) => ({
     set((state) => ({
       activeJob: state.activeJob ? { ...state.activeJob, ...updates } : null,
     })),
-
-  draftConfig: null,
-  draftName: null,
-  setDraft: (config, name) => set({ draftConfig: config, draftName: name }),
 
   scrapeEvents: [],
   addScrapeEvent: (event) =>
