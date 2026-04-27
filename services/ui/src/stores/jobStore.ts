@@ -13,12 +13,6 @@ interface JobStore {
   setActiveJob: (job: JobDetail | null) => void
   updateActiveJob: (updates: Partial<JobDetail>) => void
 
-  // Wizard step completion tracking. The current step itself is derived
-  // from the URL (/job/:id/:stage) — this set just tracks which steps the
-  // user has finished so the stepper can render check marks.
-  completedSteps: Set<number>
-  markStepCompleted: (step: number) => void
-
   // Draft config used to prefill /job/new (e.g., from a "clone" click in
   // history). Consumed and cleared by the wizard on mount.
   draftConfig: ScrapeConfig | null
@@ -41,14 +35,6 @@ export const useJobStore = create<JobStore>((set, get) => ({
     set((state) => ({
       activeJob: state.activeJob ? { ...state.activeJob, ...updates } : null,
     })),
-
-  completedSteps: new Set<number>(),
-  markStepCompleted: (step) =>
-    set((state) => {
-      const next = new Set(state.completedSteps)
-      next.add(step)
-      return { completedSteps: next }
-    }),
 
   draftConfig: null,
   draftName: null,

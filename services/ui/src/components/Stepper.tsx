@@ -84,10 +84,8 @@ export default function Stepper({
         const stageInfo = stages[step.id]
         const status = stageInfo.status
         const isCurrent = i === currentStep
-        // A step is reachable if any earlier step has been touched at all
-        // (any non-pending status), or if it's the first step. The previous
-        // implementation gated on `completedSteps.has(i-1)` — same idea but
-        // derived from server fields instead of session-cached writes.
+        // A step is reachable if the previous step has been touched at all
+        // (any non-pending status), or if it's the first step.
         const prevStatus = i > 0 ? stages[steps[i - 1].id].status : 'complete'
         const isReachable = i === 0 || prevStatus !== 'pending'
 
