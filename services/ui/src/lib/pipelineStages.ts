@@ -35,9 +35,9 @@ export const STAGE_NAMES = ['config', 'scrape', 'schema', 'mapper', 'results'] a
 export type StageName = (typeof STAGE_NAMES)[number]
 
 // Loose shape — matches the gateway's job record after JSON deserialization.
-// We intentionally accept `Record<string, unknown>` so the function works for
-// any payload from the API without coupling to the full JobDetail interface.
-type JobLike = Record<string, unknown> | null | undefined
+// `unknown` so callers can pass a typed `JobDetail` (from api/client.ts), a
+// raw decoded JSON object, or null/undefined without casts. Internal narrowing
+// rejects anything that isn't a plain object.
 
 function stringField(job: Record<string, unknown>, key: string): string {
   const v = job[key]
@@ -95,17 +95,17 @@ function mapperComplete(extractionConfig: Record<string, unknown>): boolean {
   return true
 }
 
-export function computePipelineStages(job: JobLike): PipelineStages {
-  if (!job) {
-    const pending: StageInfo = { status: 'pending', message: null }
+export function computePipelineStages(jobInput: unknown): PipelineStages {
+  if (!jobInput || typeof jobInput !== 'object' || Array.isArray(jobInput)) {
     return {
-      config: pending,
-      scrape: pending,
-      schema: pending,
-      mapper: pending,
-      results: pending,
+      config: { status: 'pending', message: null },
+      scrape: { status: 'pending', message: null },
+      schema: { status: 'pending', message: null },
+      mapper: { status: 'pending', message: null },
+      results: { status: 'pending', message: null },
     }
   }
+  const job = jobInput as Record<string, unknown>
 
   const status = stringField(job, 'status')
   const failedStage = stringField(job, 'failed_stage') || null

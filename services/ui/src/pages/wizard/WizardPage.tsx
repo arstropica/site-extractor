@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { jobs, extraction, type JobDetail, type ScrapeConfig } from '@/api/client'
@@ -10,6 +10,7 @@ import ScrapeMonitorStep from './ScrapeMonitorStep'
 import SchemaBuilderStep from './SchemaBuilderStep'
 import ContentMapperStep from './ContentMapperStep'
 import ResultsStep from './ResultsStep'
+import { computePipelineStages, type StageName } from '@/lib/pipelineStages'
 
 // URL-stage <-> step-index mapping. The URL is the source of truth for
 // which step the wizard shows, so refresh / back-button / deep-linking
@@ -38,7 +39,7 @@ function stageForJobStatus(job: JobDetail | null): Stage {
   }
 }
 
-const STEPS = [
+const STEPS: { id: StageName; label: string; description: string }[] = [
   { id: 'config', label: 'Scraper Config', description: 'URLs & settings' },
   { id: 'scrape', label: 'Scrape Monitor', description: 'Real-time progress' },
   { id: 'schema', label: 'Schema Builder', description: 'Define structure' },
@@ -54,13 +55,17 @@ export default function WizardPage() {
   const {
     activeJob,
     setActiveJob,
-    completedSteps,
     markStepCompleted,
     clearScrapeEvents,
     draftConfig,
     draftName,
     setDraft,
   } = useJobStore()
+
+  // Pipeline-stage status is a pure projection of the active job record.
+  // useMemo just keeps the object identity stable across renders so the
+  // Stepper's prop comparison stays cheap; the function itself is fast.
+  const stages = useMemo(() => computePipelineStages(activeJob), [activeJob])
 
   // Derive the current step from the URL stage. If the URL has no stage
   // segment yet (or an invalid one), currentStep falls back to 0 until
@@ -143,12 +148,7 @@ export default function WizardPage() {
     }
   }
 
-  // Failed steps
-  const failedSteps = new Set<number>()
-  if (activeJob?.status === 'failed') {
-    if (currentStep <= 1) failedSteps.add(1)
-    else failedSteps.add(currentStep)
-  }
+  // (failedSteps removed — Stepper now derives failure from `stages` directly.)
 
   // Create job + start scrape. Used for both genuinely new jobs and clones —
   // clones arrive at /job/new with a draft config in the store, so the
@@ -259,8 +259,7 @@ export default function WizardPage() {
           <Stepper
             steps={STEPS}
             currentStep={currentStep}
-            completedSteps={completedSteps}
-            failedSteps={failedSteps}
+            stages={stages}
             stepProgress={scrapeProgress}
             onStepClick={handleStepClick}
           />
