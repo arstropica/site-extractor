@@ -13,6 +13,7 @@ import httpx
 from ..database import db
 from ..config import settings
 from ..services.websocket import ws_manager
+from shared.state_machine import IllegalTransition
 
 router = APIRouter()
 
@@ -36,12 +37,14 @@ async def start_extraction(job_id: str, request: Request):
     # Write page index for the extraction service to consume
     await _write_page_index(job_id)
 
-    await db.update_job(job_id, {
-        "status": "extracting",
-        # Clear any prior failure attribution; the job is being retried.
-        "failed_stage": None,
-        "error_message": None,
-    })
+    try:
+        await db.update_status(job_id, "extracting", extras={
+            # Clear any prior failure attribution; the job is being retried.
+            "failed_stage": None,
+            "error_message": None,
+        })
+    except IllegalTransition as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
     # Load schema fields if schema_id is set
     extraction_config = job["extraction_config"]
@@ -73,20 +76,24 @@ async def start_extraction(job_id: str, request: Request):
                 except Exception:
                     upstream_detail = resp.text[:500]
                 msg = f"Extraction service {resp.status_code}: {upstream_detail}"
-                await db.update_job(job_id, {
-                    "status": "failed",
-                    "error_message": msg,
-                    "failed_stage": "extract",
-                })
+                try:
+                    await db.update_status(job_id, "failed", extras={
+                        "error_message": msg,
+                        "failed_stage": "extract",
+                    })
+                except IllegalTransition:
+                    pass  # already terminal — surface 502 anyway
                 raise HTTPException(status_code=502, detail=msg)
             result = resp.json()
     except httpx.HTTPError as e:
         msg = f"Extraction service unreachable: {type(e).__name__}: {e}"
-        await db.update_job(job_id, {
-            "status": "failed",
-            "error_message": msg,
-            "failed_stage": "extract",
-        })
+        try:
+            await db.update_status(job_id, "failed", extras={
+                "error_message": msg,
+                "failed_stage": "extract",
+            })
+        except IllegalTransition:
+            pass
         raise HTTPException(status_code=502, detail=msg)
 
     # Persist results to SQLite
@@ -99,10 +106,14 @@ async def start_extraction(job_id: str, request: Request):
         result_data = json.loads(result_path.read_text())
         await db.save_extraction_results(job_id, result_id, result_data)
 
-    await db.update_job(job_id, {
-        "status": "completed",
-        "completed_at": datetime.utcnow().isoformat(),
-    })
+    try:
+        await db.update_status(job_id, "completed", extras={
+            "completed_at": datetime.utcnow().isoformat(),
+        })
+    except IllegalTransition as e:
+        # Should not happen — we just set status='extracting' a moment ago
+        # — but if it does, surface it rather than swallowing.
+        raise HTTPException(status_code=409, detail=str(e))
 
     return {
         "job_id": job_id,

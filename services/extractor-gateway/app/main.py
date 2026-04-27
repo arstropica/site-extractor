@@ -23,6 +23,7 @@ from .routes import jobs, schemas, scraper, extraction, pages, system, internal
 from .services.websocket import ws_manager
 from .services.auto_resume import resume_orphaned_jobs
 from .services.seed_templates import seed_templates
+from shared.state_machine import IllegalTransition
 
 # Without this, logger.info(...) calls from our app modules are silently
 # dropped — uvicorn only configures its own loggers, not Python's root,
@@ -76,30 +77,39 @@ async def lifespan(app: FastAPI):
                     job_id = event.get("job_id")
                     data = event.get("data", {})
 
+                    # Background event relay: if a transition is illegal
+                    # (e.g., job already cancelled) we log and skip rather
+                    # than blow up the relay loop. This is a recovery path
+                    # for redelivered/late events, not a place to enforce
+                    # caller correctness — the dedicated route handlers
+                    # already enforced it on the way in.
                     if event_type == "SCRAPE_STATUS" and job_id:
                         status = data.get("status")
-                        if status == "failed":
-                            await db.update_job(job_id, {
-                                "status": "failed",
-                                "error_message": data.get("error", "Unknown error"),
-                                "failed_stage": "scrape",
-                            })
-                        elif status == "paused":
-                            await db.update_job(job_id, {"status": "paused"})
+                        try:
+                            if status == "failed":
+                                await db.update_status(job_id, "failed", extras={
+                                    "error_message": data.get("error", "Unknown error"),
+                                    "failed_stage": "scrape",
+                                })
+                            elif status == "paused":
+                                await db.update_status(job_id, "paused")
+                        except IllegalTransition as e:
+                            logger.debug(f"Skipping illegal SCRAPE_STATUS event: {e}")
 
                     elif event_type == "EXTRACTION_STATUS" and job_id:
                         status = data.get("status")
-                        if status == "completed":
-                            await db.update_job(job_id, {
-                                "status": "completed",
-                                "completed_at": datetime.utcnow().isoformat(),
-                            })
-                        elif status == "failed":
-                            await db.update_job(job_id, {
-                                "status": "failed",
-                                "error_message": data.get("error", "Extraction failed"),
-                                "failed_stage": "extract",
-                            })
+                        try:
+                            if status == "completed":
+                                await db.update_status(job_id, "completed", extras={
+                                    "completed_at": datetime.utcnow().isoformat(),
+                                })
+                            elif status == "failed":
+                                await db.update_status(job_id, "failed", extras={
+                                    "error_message": data.get("error", "Extraction failed"),
+                                    "failed_stage": "extract",
+                                })
+                        except IllegalTransition as e:
+                            logger.debug(f"Skipping illegal EXTRACTION_STATUS event: {e}")
 
                 except (json.JSONDecodeError, Exception) as e:
                     logger.debug(f"Event relay error: {e}")

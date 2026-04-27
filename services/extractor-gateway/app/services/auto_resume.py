@@ -15,6 +15,7 @@ import asyncio
 import logging
 
 from ..database import db
+from shared.state_machine import IllegalTransition
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +42,13 @@ async def resume_orphaned_jobs():
     for job in candidates:
         job_id = job["id"]
         try:
-            await db.update_job(job_id, {
-                "status": "paused",
+            await db.update_status(job_id, "paused", extras={
                 "error_message": (
                     "Service restarted while this scrape was running. "
                     "Resume to continue from where it left off, or cancel."
                 ),
             })
+        except IllegalTransition as e:
+            logger.warning(f"Cannot mark orphan {job_id} paused: {e}")
         except Exception as e:
             logger.error(f"Failed to mark orphaned job {job_id} as paused: {e!r}")

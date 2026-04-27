@@ -2,10 +2,14 @@
 
 import aiosqlite
 import json
-from typing import Optional, List
+import logging
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 from .config import settings
+from shared.state_machine import IllegalTransition, is_legal_transition
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -215,6 +219,36 @@ class Database:
             f"UPDATE jobs SET {', '.join(set_clauses)} WHERE id = ?", params
         )
         await self._db.commit()
+
+    async def update_status(
+        self,
+        job_id: str,
+        new_status: str,
+        extras: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Validate the transition before writing.
+
+        Same-status writes (current == new_status) are accepted as no-ops
+        for the status field itself but `extras` are still applied — this
+        lets callers stay idempotent on duplicate events without
+        special-casing redelivery.
+
+        Raises `IllegalTransition` if `current → new_status` isn't in the
+        legal graph (`shared.state_machine.LEGAL_TRANSITIONS`). The HTTP
+        boundary catches this and returns 409.
+        """
+        job = await self.get_job(job_id)
+        if not job:
+            raise IllegalTransition("<missing>", new_status)
+        current = job.get("status") or ""
+        if not is_legal_transition(current, new_status):
+            raise IllegalTransition(current, new_status)
+        payload: Dict[str, Any] = dict(extras) if extras else {}
+        if current != new_status:
+            payload["status"] = new_status
+        if not payload:
+            return  # nothing to do
+        await self.update_job(job_id, payload)
 
     async def list_jobs(self, status: str = None, search: str = None,
                         date_from: str = None, date_to: str = None,

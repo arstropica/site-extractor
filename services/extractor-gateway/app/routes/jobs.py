@@ -16,6 +16,7 @@ from ..services.encryption import (
     decrypt_scrape_config,
     CredentialDecryptError,
 )
+from shared.state_machine import IllegalTransition
 
 router = APIRouter()
 
@@ -133,7 +134,11 @@ async def update_job(job_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Job not found")
 
     body = await request.json()
-    allowed_fields = {"name", "extraction_config", "extraction_mode", "status"}
+    # `status` is intentionally NOT in the allowed list — pipeline state
+    # changes go through dedicated endpoints (start-scrape, pause, cancel,
+    # extraction/start) which validate transitions via Database.update_status.
+    # Letting clients PATCH status directly would bypass the state machine.
+    allowed_fields = {"name", "extraction_config", "extraction_mode"}
     updates = {k: v for k, v in body.items() if k in allowed_fields}
     if "name" in updates and updates["name"] is not None:
         updates["name"] = updates["name"].strip() or None
@@ -241,11 +246,15 @@ async def start_scrape(job_id: str, request: Request):
     try:
         decrypted_config = decrypt_scrape_config(job["scrape_config"])
     except CredentialDecryptError as e:
-        await db.update_job(job_id, {
-            "status": "failed",
-            "error_message": str(e),
-            "failed_stage": "scrape",
-        })
+        try:
+            await db.update_status(job_id, "failed", extras={
+                "error_message": str(e),
+                "failed_stage": "scrape",
+            })
+        except IllegalTransition:
+            # Some terminal-status edge case — log but still surface 400
+            # to the caller.
+            pass
         raise HTTPException(status_code=400, detail=str(e))
 
     # Forward to scraper service
@@ -263,12 +272,14 @@ async def start_scrape(job_id: str, request: Request):
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Scraper service error: {str(e)}")
 
-    await db.update_job(job_id, {
-        "status": "scraping",
-        "started_at": datetime.utcnow().isoformat(),
-        # Clear any prior failure attribution; the job is being retried.
-        "failed_stage": None,
-    })
+    try:
+        await db.update_status(job_id, "scraping", extras={
+            "started_at": datetime.utcnow().isoformat(),
+            # Clear any prior failure attribution; the job is being retried.
+            "failed_stage": None,
+        })
+    except IllegalTransition as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
     await ws_manager.broadcast_event("SCRAPE_STATUS", job_id, {"status": "scraping"})
 
@@ -289,7 +300,10 @@ async def pause_job(job_id: str, request: Request):
     except httpx.HTTPError:
         pass
 
-    await db.update_job(job_id, {"status": "paused"})
+    try:
+        await db.update_status(job_id, "paused")
+    except IllegalTransition as e:
+        raise HTTPException(status_code=409, detail=str(e))
     await ws_manager.broadcast_event("SCRAPE_STATUS", job_id, {"status": "paused"})
     return {"job_id": job_id, "status": "paused"}
 
@@ -308,7 +322,10 @@ async def cancel_job(job_id: str, request: Request):
     except httpx.HTTPError:
         pass
 
-    await db.update_job(job_id, {"status": "cancelled"})
+    try:
+        await db.update_status(job_id, "cancelled")
+    except IllegalTransition as e:
+        raise HTTPException(status_code=409, detail=str(e))
     await ws_manager.broadcast_event("SCRAPE_STATUS", job_id, {"status": "cancelled"})
     return {"job_id": job_id, "status": "cancelled"}
 

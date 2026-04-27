@@ -17,6 +17,7 @@ from datetime import datetime
 from fastapi import APIRouter, Request
 
 from ..database import db
+from shared.state_machine import IllegalTransition
 
 logger = logging.getLogger(__name__)
 
@@ -100,17 +101,19 @@ async def mark_scraped(job_id: str, request: Request):
     job = await db.get_job(job_id)
     if not job:
         return {"updated": False, "reason": "job not found"}
-    if job["status"] not in ("scraping", "paused"):
-        return {"updated": False, "reason": f"status={job['status']}"}
-    await db.update_job(job_id, {
-        "status": "scraped",
-        "scraped_at": datetime.utcnow().isoformat(),
-        "pages_discovered": int(body.get("pages_discovered", 0)),
-        "pages_downloaded": int(body.get("pages_downloaded", 0)),
-        "pages_errored": int(body.get("pages_errored", 0)),
-        "resources_discovered": int(body.get("resources_discovered", 0)),
-        "resources_downloaded": int(body.get("resources_downloaded", 0)),
-        "resources_errored": int(body.get("resources_errored", 0)),
-        "bytes_downloaded": int(body.get("bytes_downloaded", 0)),
-    })
+    try:
+        await db.update_status(job_id, "scraped", extras={
+            "scraped_at": datetime.utcnow().isoformat(),
+            "pages_discovered": int(body.get("pages_discovered", 0)),
+            "pages_downloaded": int(body.get("pages_downloaded", 0)),
+            "pages_errored": int(body.get("pages_errored", 0)),
+            "resources_discovered": int(body.get("resources_discovered", 0)),
+            "resources_downloaded": int(body.get("resources_downloaded", 0)),
+            "resources_errored": int(body.get("resources_errored", 0)),
+            "bytes_downloaded": int(body.get("bytes_downloaded", 0)),
+        })
+    except IllegalTransition as e:
+        # Job already terminal (cancelled, failed via different path) —
+        # don't fight the existing state. Tell the scraper we ignored it.
+        return {"updated": False, "reason": str(e)}
     return {"updated": True}
