@@ -82,7 +82,14 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
   }
 
   const handleRerun = async () => {
-    if (!confirm('Re-run this scrape? Pages and resources unchanged on the server will be reused from disk; the rest will be re-downloaded.')) return
+    // Re-scrape from `completed` discards the existing extraction
+    // results (clear_scrape_data nukes them so the run is consistent
+    // with the new pages). Surface that explicitly so the user isn't
+    // surprised when their results vanish.
+    const message = isCompleted
+      ? 'Re-run this scrape? This will DISCARD the existing extraction results. Pages and resources unchanged on the server will be reused from disk; the rest will be re-downloaded.'
+      : 'Re-run this scrape? Pages and resources unchanged on the server will be reused from disk; the rest will be re-downloaded.'
+    if (!confirm(message)) return
     await jobsApi.startScrape(activeJob.id)
     updateActiveJob({
       status: 'scraping',

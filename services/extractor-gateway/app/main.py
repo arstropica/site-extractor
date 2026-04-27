@@ -83,6 +83,34 @@ async def lifespan(app: FastAPI):
                     # for redelivered/late events, not a place to enforce
                     # caller correctness — the dedicated route handlers
                     # already enforced it on the way in.
+
+                    # Persist mid-flight counter snapshots so a UI refresh
+                    # or any API poll mid-scrape sees current progress
+                    # rather than a stale 0 left over from job-create. Maps
+                    # the scraper's *_total/*_done event shape onto the job
+                    # row's *_discovered/*_downloaded columns.
+                    if event_type == "SCRAPE_PROGRESS" and job_id:
+                        progress_updates = {}
+                        if isinstance(data.get("pages_total"), int):
+                            progress_updates["pages_discovered"] = data["pages_total"]
+                        if isinstance(data.get("pages_done"), int):
+                            progress_updates["pages_downloaded"] = data["pages_done"]
+                        if isinstance(data.get("pages_errored"), int):
+                            progress_updates["pages_errored"] = data["pages_errored"]
+                        if isinstance(data.get("resources_total"), int):
+                            progress_updates["resources_discovered"] = data["resources_total"]
+                        if isinstance(data.get("resources_done"), int):
+                            progress_updates["resources_downloaded"] = data["resources_done"]
+                        if isinstance(data.get("resources_errored"), int):
+                            progress_updates["resources_errored"] = data["resources_errored"]
+                        if isinstance(data.get("bytes_downloaded"), int):
+                            progress_updates["bytes_downloaded"] = data["bytes_downloaded"]
+                        if progress_updates:
+                            try:
+                                await db.update_job(job_id, progress_updates)
+                            except Exception as e:
+                                logger.debug(f"SCRAPE_PROGRESS persist skipped: {e}")
+
                     if event_type == "SCRAPE_STATUS" and job_id:
                         status = data.get("status")
                         try:

@@ -509,8 +509,17 @@ class Database:
 
     async def save_extraction_results(self, job_id: str, result_id: str, data: list) -> None:
         now = datetime.utcnow().isoformat()
+        # Each re-extract generates a fresh result_id (UUID) on the
+        # extraction-service side, so INSERT-OR-REPLACE on the PK never
+        # collides — old rows would survive forever, hidden only by
+        # get_extraction_results' "latest" filter. Drop any existing rows
+        # for this job before inserting so the table reflects only the
+        # current run. Re-runs are by design overwrite-only (no history).
+        await self._db.execute(
+            "DELETE FROM extraction_results WHERE job_id = ?", (job_id,)
+        )
         await self._db.execute("""
-            INSERT OR REPLACE INTO extraction_results (id, job_id, data, created_at)
+            INSERT INTO extraction_results (id, job_id, data, created_at)
             VALUES (?, ?, ?, ?)
         """, (result_id, job_id, json.dumps(data), now))
         await self._db.commit()

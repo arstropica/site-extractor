@@ -245,7 +245,7 @@ Per-step verification at the bottom of each migration step:
 - **Step 5**: Navigate back-and-forth between two jobs in the same window; `scrapeEvents` panel must clear on each navigation.
 - **Step 6**: A job that fails during scrape vs during extraction should show the failure on the correct stepper step.
 - **Step 7-8**: `POST /api/jobs/{id}/clone` from curl returns a new job with `extraction_config` populated; the UI's Clone button produces the same result and navigates to the new job page.
-- **Step 9**: `curl -X PATCH .../jobs/{id} -d '{"status":"completed"}'` on a `created` job returns 409.
+- **Step 9**: PATCH no longer accepts `status` — `curl -X PATCH .../jobs/{id} -d '{"status":"completed"}'` silently filters it out (allowed_fields gate), so the response shows the unchanged status. Direct illegal transitions through the dedicated routes (`/pause` on a completed job, etc.) are blocked by the route's pre-check (returns **400** with a friendly message like "Can only pause a running scrape") before the validator runs. The validator returns **409** for transitions that bypass the pre-checks (e.g., events from the background relay, or future endpoints). Both layers block illegal writes; expect 400 from user-driven illegals and 409 from internal/relay paths.
 - **Step 10**: Two windows on the same scraping job both show counter ticks at the same rate, both show the same Activity Log.
 
 ---
