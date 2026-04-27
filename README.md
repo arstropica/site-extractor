@@ -217,6 +217,33 @@ curl -OJ "http://localhost:12000/api/extraction/$JOB_ID/results/export/json"
 curl -OJ "http://localhost:12000/api/extraction/$JOB_ID/results/export/csv?normalize=true"
 ```
 
+### Fetch a stored asset
+
+`GET /api/asset/{job_id}/{file_path:path}` serves any file under the job's data directory with content-type and cache headers populated from the file's `<path>.meta.json` companion. Designed for external consumers that pull extraction results and follow asset URLs in the records — the extraction engine rewrites image fields like `../assets/<name>` to `/api/asset/<job_id>/assets/<name>`, so a consumer reading `/api/extraction/{job_id}/results` can follow logo / image fields directly without knowing the on-disk layout.
+
+```bash
+# Fetch an asset by job-relative path. The path can point at anything
+# under the job's data directory: assets/, pages/, results/, etc.
+curl -OJ "http://localhost:12000/api/asset/$JOB_ID/assets/abc123_logo.gif"
+
+# Conditional GET — pass back the ETag from a prior response;
+# unchanged bytes return 304 Not Modified with no body.
+ETAG=$(curl -sI "http://localhost:12000/api/asset/$JOB_ID/assets/abc123_logo.gif" | awk -F'"' '/^etag:/ {print "\""$2"\""}')
+curl -i -H "If-None-Match: $ETAG" "http://localhost:12000/api/asset/$JOB_ID/assets/abc123_logo.gif"
+```
+
+Response headers (when `<path>.meta.json` exists):
+
+| Header | Source |
+|---|---|
+| `Content-Type` | `meta.content_type` (else FastAPI's filesystem guess) |
+| `ETag` | `meta.etag` ‖ `meta.content_hash` (the latter is the bytes-of-this-file digest the scraper computed) |
+| `Last-Modified` | `meta.last_modified` (string passthrough) |
+| `X-Original-URL` | `meta.url` — lets consumers correlate stored bytes with the source they came from |
+| `Content-Length` | filesystem (always accurate; meta could be stale) |
+
+Path traversal (`..`, encoded or raw) returns **403**; missing files return **404**. HTML is served raw — the picker injection used by the in-app mapper iframe lives only on `/api/pages/{job_id}/view/{page_id}`.
+
 ### WebSocket events
 
 Connect to `ws://localhost:12000/ws` to receive `PAGE_DISCOVERED`, `PAGE_DOWNLOADED`, `RESOURCE_DISCOVERED`, `RESOURCE_DOWNLOADED`, `SCRAPE_PROGRESS`, `SCRAPE_STATUS`, `PAGE_TREE_UPDATE`, `EXTRACTION_PROGRESS`, and `EXTRACTION_STATUS` events in real time.
