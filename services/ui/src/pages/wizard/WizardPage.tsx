@@ -99,13 +99,17 @@ export default function WizardPage() {
     navigate(`/job/${jobId}/${nextStageForJob(jobData)}`, { replace: true })
   }, [jobId, urlStage, isNew, jobData, navigate])
 
-  // Scrape progress for stepper animation
+  // Scrape progress for stepper animation. "Completed" = downloaded + errored
+  // — both are definitive outcomes; the bar shouldn't sit short of full just
+  // because some URLs failed (the ScrapeMonitorStep's stacked bar surfaces
+  // the success/error partition separately).
   const scrapeProgress: Record<number, number> = {}
   if (activeJob?.status === 'scraping') {
     const totalDiscovered = (activeJob.pages_discovered ?? 0) + (activeJob.resources_discovered ?? 0)
     const totalDone = (activeJob.pages_downloaded ?? 0) + (activeJob.resources_downloaded ?? 0)
+    const totalErrored = (activeJob.pages_errored ?? 0) + (activeJob.resources_errored ?? 0)
     if (totalDiscovered > 0) {
-      scrapeProgress[1] = Math.min(totalDone / totalDiscovered, 0.99)
+      scrapeProgress[1] = Math.min((totalDone + totalErrored) / totalDiscovered, 0.99)
     }
   }
 

@@ -221,23 +221,55 @@ export default function SchemaBuilderStep({ onContinue }: SchemaBuilderStepProps
     }
   }, [jsonText, setFields, setJsonMode])
 
+  /** Parse the JSON tab's text and apply to `fields` if currently in JSON
+   * mode. Used by Save / Continue handlers so an unswitched-back JSON edit
+   * doesn't silently leave `fields` stale (and `canContinue` false). Returns
+   * the fields to act on, or null on parse error (sets `jsonError`).
+   */
+  const commitJsonIfNeeded = useCallback((): SchemaField[] | null => {
+    if (!jsonMode) return fields
+    try {
+      const parsed = JSON.parse(jsonText) as SchemaField[]
+      if (!Array.isArray(parsed)) {
+        setJsonError('Top-level value must be an array of fields')
+        return null
+      }
+      setFields(parsed)
+      setJsonError(null)
+      return parsed
+    } catch (e) {
+      setJsonError(String(e))
+      return null
+    }
+  }, [jsonMode, jsonText, fields, setFields])
+
   const queryClient = useQueryClient()
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle')
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const name = schemaName.trim() || 'Untitled Schema'
+      // If the user is on the JSON tab, parse-and-apply before saving so
+      // we don't persist stale `fields`. Aborts cleanly if JSON is invalid.
+      const fieldsToSave = commitJsonIfNeeded()
+      if (!fieldsToSave) throw new Error('Invalid JSON — fix and retry')
+
+      // Auto-derive a name when the user leaves the field blank so save
+      // (and Continue's auto-save) doesn't silently produce 'Untitled
+      // Schema' duplicates in the saved-schemas dropdown. Falls back to a
+      // short job-id prefix when the job itself is unnamed.
+      const explicit = schemaName.trim()
+      const fallback = activeJob?.name?.trim()
+        ? `${activeJob.name.trim()} schema`
+        : `${activeJob?.id.slice(0, 8) ?? 'untitled'}... schema`
+      const name = explicit || fallback
       let idToPersist = schemaId
       if (schemaId) {
-        // Update existing schema
-        await schemasApi.update(schemaId, { name, fields })
+        await schemasApi.update(schemaId, { name, fields: fieldsToSave })
       } else {
-        // Create new schema
-        const created = await schemasApi.create({ name, fields })
+        const created = await schemasApi.create({ name, fields: fieldsToSave })
         setSchemaId(created.id)
         idToPersist = created.id
       }
-      // Save reference on the job too, so the mapper has it after refresh.
       if (idToPersist) await persistSchemaIdToJob(idToPersist)
       setSaveStatus('saved')
       setTimeout(() => setSaveStatus('idle'), 2000)
@@ -245,7 +277,35 @@ export default function SchemaBuilderStep({ onContinue }: SchemaBuilderStepProps
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['schemas'] }),
   })
 
-  const canContinue = fields.length > 0 && fields.every((f) => f.name.trim())
+  // Continue commits any pending JSON edit, persists the schema to the
+  // server (so the mapper has a real schema_id and a refresh of either
+  // step survives), then advances. This way Continue is "ready to map" —
+  // the user doesn't have to remember to click Save first.
+  const handleContinue = useCallback(async () => {
+    const committed = commitJsonIfNeeded()
+    if (!committed) return // jsonError already set; user sees it
+    try {
+      await saveMutation.mutateAsync()
+    } catch {
+      return // save error already surfaced via mutation state
+    }
+    onContinue()
+  }, [commitJsonIfNeeded, saveMutation, onContinue])
+
+  // While in JSON mode, evaluate canContinue against the parsed JSON
+  // rather than the (stale) `fields` state. Cheap parse — this textarea
+  // is small.
+  const canContinue = (() => {
+    if (jsonMode) {
+      try {
+        const parsed = JSON.parse(jsonText) as SchemaField[]
+        return Array.isArray(parsed) && parsed.length > 0 && parsed.every((f) => f?.name?.trim?.())
+      } catch {
+        return false
+      }
+    }
+    return fields.length > 0 && fields.every((f) => f.name.trim())
+  })()
 
   return (
     <div className="space-y-6">
@@ -366,7 +426,7 @@ export default function SchemaBuilderStep({ onContinue }: SchemaBuilderStepProps
         <button
           className="btn btn-primary gap-2"
           disabled={!canContinue}
-          onClick={onContinue}
+          onClick={handleContinue}
         >
           Continue to Mapping
           <span className="icon-[tabler--arrow-right] size-5" />

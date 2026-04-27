@@ -52,9 +52,19 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
   const totalDiscovered = (activeJob.pages_discovered ?? 0) + (activeJob.resources_discovered ?? 0)
   const totalDownloaded = (activeJob.pages_downloaded ?? 0) + (activeJob.resources_downloaded ?? 0)
   const totalErrored = (activeJob.pages_errored ?? 0) + (activeJob.resources_errored ?? 0)
-  const progress = totalDiscovered > 0
+  // Completion = both downloaded and errored count as "attempted to a definitive
+  // outcome." Old single-segment bar tracked only downloaded, which made a
+  // partial-success scrape look stuck below 100% even after every URL had
+  // been tried. The two-segment fill below preserves the success/error
+  // partition visually so the user can see at a glance how much of the
+  // remaining bar is real progress vs accumulated failures.
+  const downloadedPct = totalDiscovered > 0
     ? Math.min((totalDownloaded / totalDiscovered) * 100, 100)
     : 0
+  const erroredPct = totalDiscovered > 0
+    ? Math.min((totalErrored / totalDiscovered) * 100, 100)
+    : 0
+  const completedPct = Math.min(downloadedPct + erroredPct, 100)
 
   const handlePause = async () => {
     await jobsApi.pause(activeJob.id)
@@ -135,18 +145,29 @@ export default function ScrapeMonitorStep({ onContinue }: ScrapeMonitorStepProps
         </div>
       </div>
 
-      {/* Progress bar */}
+      {/* Progress bar — stacked: success then errors then pending */}
       <div className="bg-base-200/50 rounded-xl p-4 space-y-2">
         <div className="flex justify-between text-xs text-base-content/50">
-          <span>{totalDownloaded} / {totalDiscovered} URLs</span>
-          <span>{Math.round(progress)}%</span>
+          <span>
+            {totalDownloaded + totalErrored} / {totalDiscovered} URLs
+            {totalErrored > 0 && (
+              <span className="text-warning ml-1">
+                ({totalDownloaded} ok · {totalErrored} err)
+              </span>
+            )}
+          </span>
+          <span>{Math.round(completedPct)}%</span>
         </div>
-        <div className="h-2 w-full bg-base-300/50 rounded-full overflow-hidden">
+        <div className="h-2 w-full bg-base-300/50 rounded-full overflow-hidden flex">
           <div
-            className={`h-full rounded-full transition-all duration-500 ${
-              isScraped ? 'bg-success' : isFailed ? 'bg-error' : isPaused ? 'bg-warning' : 'bg-primary'
+            className={`h-full transition-all duration-500 ${
+              isFailed ? 'bg-error' : isPaused ? 'bg-warning' : 'bg-success'
             }`}
-            style={{ width: `${progress}%` }}
+            style={{ width: `${downloadedPct}%` }}
+          />
+          <div
+            className="h-full bg-warning transition-all duration-500"
+            style={{ width: `${erroredPct}%` }}
           />
         </div>
       </div>
