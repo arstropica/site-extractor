@@ -520,11 +520,15 @@ class ExtractionEngine:
                 return None
 
         elif field_type == "image":
-            # Resolve relative URL and store locally
+            # Resolve relative URL and store locally.
+            # `../assets/<name>` is the rewrite that page_storage applies
+            # to inline asset references when saving HTML — we translate
+            # it to the gateway's external asset endpoint so consumers
+            # reading these results can fetch the file directly without
+            # knowing the on-disk layout.
             src = str(raw)
             if src.startswith("../assets/"):
-                # Already a local path from page_storage rewriting
-                return src.replace("../", f"/data/jobs/{job_id}/")
+                return src.replace("../assets/", f"/api/asset/{job_id}/assets/")
             elif src.startswith(("http://", "https://")):
                 return src
             elif page_url:
