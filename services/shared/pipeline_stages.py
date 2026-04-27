@@ -166,3 +166,24 @@ def compute_pipeline_stages(job: Optional[Dict[str, Any]]) -> PipelineStages:
         results = StageInfo(StageStatus.PENDING)
 
     return PipelineStages(config, scrape, schema, mapper, results)
+
+
+def next_stage_for_job(job: Optional[Dict[str, Any]]) -> str:
+    """Pick the wizard stage the user should land on for this job.
+
+    Walks stages in pipeline order and returns the first one that is not
+    complete-or-warning (i.e., still needs the user's attention: pending,
+    in_progress, or failed). If every stage is complete/warning, returns
+    `results` so the user lands on the output rather than being kicked
+    back to the start.
+
+    Replaces the older `stageForJobStatus` switch — same intent, but
+    consumes the same PipelineStages projection the stepper uses, so
+    the redirect target and the visual marks can never disagree.
+    """
+    stages = compute_pipeline_stages(job)
+    for name in STAGES:
+        info: StageInfo = getattr(stages, name)
+        if info.status not in (StageStatus.COMPLETE, StageStatus.WARNING):
+            return name
+    return STAGES[-1]

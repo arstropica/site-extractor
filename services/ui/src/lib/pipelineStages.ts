@@ -173,3 +173,27 @@ export function computePipelineStages(jobInput: unknown): PipelineStages {
 
   return { config, scrape, schema, mapper, results }
 }
+
+/**
+ * Pick the wizard stage the user should land on for this job.
+ *
+ * Walks stages in pipeline order and returns the first one that is not
+ * complete-or-warning (i.e., still needs attention: pending, in_progress,
+ * or failed). If every stage is complete or warning, returns 'results'
+ * so the user lands on the output rather than being kicked back to start.
+ *
+ * Twin of next_stage_for_job() in services/shared/pipeline_stages.py.
+ * Replaces the older `stageForJobStatus` switch in WizardPage — both the
+ * redirect target and the visual marks now consume the same
+ * PipelineStages projection, so they can never disagree.
+ */
+export function nextStageForJob(jobInput: unknown): StageName {
+  const stages = computePipelineStages(jobInput)
+  for (const name of STAGE_NAMES) {
+    const status = stages[name].status
+    if (status !== 'complete' && status !== 'warning') {
+      return name
+    }
+  }
+  return STAGE_NAMES[STAGE_NAMES.length - 1]
+}

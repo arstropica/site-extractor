@@ -10,11 +10,14 @@ import ScrapeMonitorStep from './ScrapeMonitorStep'
 import SchemaBuilderStep from './SchemaBuilderStep'
 import ContentMapperStep from './ContentMapperStep'
 import ResultsStep from './ResultsStep'
-import { computePipelineStages, type StageName } from '@/lib/pipelineStages'
+import { computePipelineStages, nextStageForJob, type StageName } from '@/lib/pipelineStages'
 
 // URL-stage <-> step-index mapping. The URL is the source of truth for
 // which step the wizard shows, so refresh / back-button / deep-linking
 // all work without resetting to step 0 or auto-jumping based on status.
+// "Where to land the user when the URL has no stage" is a separate
+// concern — handled by nextStageForJob() in @/lib/pipelineStages,
+// shared with the server-side derivation.
 const STAGES = ['config', 'scrape', 'schema', 'mapper', 'results'] as const
 type Stage = (typeof STAGES)[number]
 const STAGE_TO_INDEX: Record<Stage, number> = {
@@ -22,22 +25,6 @@ const STAGE_TO_INDEX: Record<Stage, number> = {
 }
 const isStage = (s: string | undefined): s is Stage =>
   !!s && (STAGES as readonly string[]).includes(s)
-
-function stageForJobStatus(job: JobDetail | null): Stage {
-  if (!job) return 'config'
-  switch (job.status) {
-    case 'created': return 'config'
-    case 'scraping':
-    case 'paused':
-    case 'failed':
-    case 'cancelled': return 'scrape'
-    case 'scraped': return 'schema'
-    case 'mapping': return 'mapper'
-    case 'extracting':
-    case 'completed': return 'results'
-    default: return 'config'
-  }
-}
 
 const STEPS: { id: StageName; label: string; description: string }[] = [
   { id: 'config', label: 'Scraper Config', description: 'URLs & settings' },
@@ -129,7 +116,7 @@ export default function WizardPage() {
       return
     }
     if (!jobData) return // wait until we know the job's status
-    navigate(`/job/${jobId}/${stageForJobStatus(jobData)}`, { replace: true })
+    navigate(`/job/${jobId}/${nextStageForJob(jobData)}`, { replace: true })
   }, [jobId, urlStage, isNew, jobData, navigate])
 
   // Scrape progress for stepper animation

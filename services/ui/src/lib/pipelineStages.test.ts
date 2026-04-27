@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import {
   computePipelineStages,
+  nextStageForJob,
   STAGE_NAMES,
   type PipelineStages,
   type StageInfo,
@@ -74,4 +75,116 @@ describe('computePipelineStages — edge cases', () => {
     const info: StageInfo = { status: 'warning', message: '5 errors' }
     expect(info.message).toBe('5 errors')
   })
+})
+
+describe('nextStageForJob — landing-stage picker', () => {
+  const cases: Array<{ name: string; job: unknown; expected: string }> = [
+    { name: 'null → config', job: null, expected: 'config' },
+    {
+      name: 'created_no_seeds → config',
+      job: { status: 'created', scrape_config: {} },
+      expected: 'config',
+    },
+    {
+      name: 'created_with_seeds → scrape',
+      job: { status: 'created', scrape_config: { seed_urls: ['https://x/'] } },
+      expected: 'scrape',
+    },
+    {
+      name: 'scraping → scrape',
+      job: { status: 'scraping', scrape_config: { seed_urls: ['https://x/'] } },
+      expected: 'scrape',
+    },
+    {
+      name: 'scraped_no_extraction → schema',
+      job: { status: 'scraped', scrape_config: { seed_urls: ['https://x/'] } },
+      expected: 'schema',
+    },
+    {
+      name: 'scraped_with_warnings → schema (warning is complete-enough)',
+      job: {
+        status: 'scraped',
+        scrape_config: { seed_urls: ['https://x/'] },
+        resources_errored: 12,
+      },
+      expected: 'schema',
+    },
+    {
+      name: 'scraped_schema_only → mapper',
+      job: {
+        status: 'scraped',
+        scrape_config: { seed_urls: ['https://x/'] },
+        extraction_config: { mode: 'document', schema_id: 'abc' },
+      },
+      expected: 'mapper',
+    },
+    {
+      name: 'scraped_full_config → results',
+      job: {
+        status: 'scraped',
+        scrape_config: { seed_urls: ['https://x/'] },
+        extraction_config: {
+          mode: 'document',
+          schema_id: 'abc',
+          document: { field_mappings: [{ field_path: 'x', selector: 'p' }] },
+        },
+      },
+      expected: 'results',
+    },
+    {
+      name: 'extracting → results',
+      job: {
+        status: 'extracting',
+        scrape_config: { seed_urls: ['https://x/'] },
+        extraction_config: {
+          mode: 'document',
+          schema_id: 'abc',
+          document: { field_mappings: [{ field_path: 'x', selector: 'p' }] },
+        },
+      },
+      expected: 'results',
+    },
+    {
+      name: 'completed → results',
+      job: {
+        status: 'completed',
+        scrape_config: { seed_urls: ['https://x/'] },
+        extraction_config: {
+          mode: 'document',
+          schema_id: 'abc',
+          document: { field_mappings: [{ field_path: 'x', selector: 'p' }] },
+        },
+      },
+      expected: 'results',
+    },
+    {
+      name: 'failed_at_scrape → scrape',
+      job: {
+        status: 'failed',
+        failed_stage: 'scrape',
+        scrape_config: { seed_urls: ['https://x/'] },
+      },
+      expected: 'scrape',
+    },
+    {
+      name: 'failed_at_extract → results',
+      job: {
+        status: 'failed',
+        failed_stage: 'extract',
+        scrape_config: { seed_urls: ['https://x/'] },
+        extraction_config: {
+          mode: 'document',
+          schema_id: 'abc',
+          document: { field_mappings: [{ field_path: 'x', selector: 'p' }] },
+        },
+      },
+      expected: 'results',
+    },
+  ]
+
+  for (const c of cases) {
+    it(c.name, () => {
+      expect(nextStageForJob(c.job)).toBe(c.expected)
+    })
+  }
 })
