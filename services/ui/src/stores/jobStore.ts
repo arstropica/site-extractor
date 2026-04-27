@@ -19,10 +19,10 @@ interface JobStore {
   draftName: string | null
   setDraft: (config: ScrapeConfig | null, name: string | null) => void
 
-  // Real-time scrape events
+  // Real-time scrape events. Cleared automatically by setActiveJob when
+  // the job id changes — no explicit clear needed.
   scrapeEvents: ScrapeEvent[]
   addScrapeEvent: (event: ScrapeEvent) => void
-  clearScrapeEvents: () => void
 
   // Handle WebSocket events
   handleWSEvent: (event: WSEvent) => void
@@ -30,7 +30,17 @@ interface JobStore {
 
 export const useJobStore = create<JobStore>((set, get) => ({
   activeJob: null,
-  setActiveJob: (job) => set({ activeJob: job }),
+  // Switching to a different job (or to no job) wipes per-job ephemeral state
+  // so it can't leak across views. A no-op when the same job re-loads
+  // (e.g., react-query refetch) — callers can rely on this for cheap
+  // idempotent setActiveJob(jobData) in load effects.
+  setActiveJob: (job) =>
+    set((state) => {
+      const currentId = state.activeJob?.id ?? null
+      const nextId = job?.id ?? null
+      if (currentId === nextId) return { activeJob: job }
+      return { activeJob: job, scrapeEvents: [] }
+    }),
   updateActiveJob: (updates) =>
     set((state) => ({
       activeJob: state.activeJob ? { ...state.activeJob, ...updates } : null,
@@ -45,7 +55,6 @@ export const useJobStore = create<JobStore>((set, get) => ({
     set((state) => ({
       scrapeEvents: [...state.scrapeEvents.slice(-500), event],
     })),
-  clearScrapeEvents: () => set({ scrapeEvents: [] }),
 
   handleWSEvent: (event) => {
     const { activeJob } = get()

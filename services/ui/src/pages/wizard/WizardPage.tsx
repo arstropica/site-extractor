@@ -42,7 +42,6 @@ export default function WizardPage() {
   const {
     activeJob,
     setActiveJob,
-    clearScrapeEvents,
     draftConfig,
     draftName,
     setDraft,
@@ -91,19 +90,18 @@ export default function WizardPage() {
     },
   })
 
-  // Sync activeJob from query + recompute completion marks for the stepper.
-  // No automatic step navigation here — the URL is the source of truth.
+  // Sync activeJob from query. Stepper visuals + redirect target both
+  // derive from activeJob via computePipelineStages / nextStageForJob.
+  // setActiveJob clears scrapeEvents itself when the job id changes,
+  // so per-job state can't leak across views.
   useEffect(() => {
     if (isNew) {
       setActiveJob(null)
-      clearScrapeEvents()
       return
     }
     if (!jobData) return
     setActiveJob(jobData)
-    // Stepper visuals are now derived from `stages` (computePipelineStages
-    // over activeJob) — no per-load marking needed.
-  }, [isNew, jobData, setActiveJob, clearScrapeEvents])
+  }, [isNew, jobData, setActiveJob])
 
   // Stage normalization: redirect once on mount when the URL has no stage
   // (or an invalid stage). Replace-history so the bare /job/<id> URL
@@ -138,8 +136,8 @@ export default function WizardPage() {
     mutationFn: async ({ config, name }: { config: ScrapeConfig; name?: string }) => {
       const result = await jobs.create(config, name)
       const newJob = await jobs.get(result.job_id)
+      // setActiveJob clears scrapeEvents on id change.
       setActiveJob(newJob)
-      clearScrapeEvents()
       navigate(`/job/${result.job_id}/scrape`, { replace: true })
       await jobs.startScrape(result.job_id)
       const updated = await jobs.get(result.job_id)
