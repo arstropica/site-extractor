@@ -162,15 +162,35 @@ async def update_job(job_id: str, request: Request):
 
 
 @router.post("/{job_id}/clone")
-async def clone_job(job_id: str):
-    """Clone an existing job's configuration into a new job (status='created')."""
+async def clone_job(job_id: str, request: Request):
+    """Clone a job's config into a new `created` job. Cold clone: copies
+    scrape_config + extraction_config + extraction_mode + name; does NOT
+    copy scraped pages, results, counters, timestamps, or failure state.
+
+    Body (optional): {"name_override": "..."} — if provided and non-blank,
+    used as the clone's name; otherwise falls back to "{src.name} (copy)".
+
+    Returns the full new job record so the caller can navigate without a
+    follow-up GET.
+    """
     src = await db.get_job(job_id)
     if not src:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    # Body is optional. Tolerate missing / non-JSON bodies — clone with no
+    # body is a valid call.
+    name_override: Optional[str] = None
+    try:
+        body = await request.json()
+        raw = body.get("name_override") if isinstance(body, dict) else None
+        if isinstance(raw, str) and raw.strip():
+            name_override = raw.strip()
+    except Exception:
+        pass
+
     new_id = str(uuid.uuid4())
     now = datetime.utcnow().isoformat()
-    new_name = f"{src.get('name') or f'Job {job_id[:8]}'} (copy)"
+    new_name = name_override or f"{src.get('name') or f'Job {job_id[:8]}'} (copy)"
 
     # Create new directory structure for the clone
     job_dir = Path(settings.DATA_DIR) / "jobs" / new_id
@@ -180,7 +200,8 @@ async def clone_job(job_id: str):
     (job_dir / "results").mkdir(exist_ok=True)
 
     # The source's scrape_config is already encrypted at rest; we copy as-is.
-    # Don't carry over runtime state (progress, timestamps, errors).
+    # Don't carry over runtime state (progress, timestamps, errors,
+    # failed_stage). The clone starts in `created` with a fresh slate.
     await db.create_job({
         "id": new_id,
         "name": new_name,
@@ -191,7 +212,7 @@ async def clone_job(job_id: str):
         "created_at": now,
     })
 
-    return {"job_id": new_id, "status": "created", "message": "Job cloned"}
+    return await db.get_job(new_id)
 
 
 @router.post("/{job_id}/start-scrape")

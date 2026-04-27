@@ -41,8 +41,11 @@ export const jobs = {
     request<JobDetail>(`/jobs/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string, deleteData = true) =>
     request<{ message: string }>(`/jobs/${id}?delete_data=${deleteData}`, { method: 'DELETE' }),
-  clone: (id: string) =>
-    request<{ job_id: string; status: string; message: string }>(`/jobs/${id}/clone`, { method: 'POST' }),
+  clone: (id: string, nameOverride?: string) =>
+    request<JobDetail>(`/jobs/${id}/clone`, {
+      method: 'POST',
+      body: nameOverride?.trim() ? JSON.stringify({ name_override: nameOverride.trim() }) : undefined,
+    }),
   startScrape: (id: string) =>
     request<{ job_id: string; status: string }>(`/jobs/${id}/start-scrape`, { method: 'POST' }),
   pause: (id: string) =>
