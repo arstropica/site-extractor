@@ -132,12 +132,22 @@ class DomainFilter(BaseModel):
     path_filters: List[str] = Field(default_factory=list)
 
 
+class DedupConfig(BaseModel):
+    # Opt-in. When enabled, the scraper silently skips downloading a
+    # resource whose bytes match an already-saved file in the same job.
+    # Default off so every URL the page references produces its own
+    # row + file — references in extracted data resolve cleanly and
+    # downstream consumers don't 404 on duplicates.
+    enabled: bool = False
+
+
 class ScrapeConfig(BaseModel):
     seed_urls: List[str]
     crawl_mode: CrawlMode = CrawlMode.HTTP
     depth_limit: int = 3
     domain_filter: DomainFilter = Field(default_factory=DomainFilter)
     resource_filters: Dict[str, ResourceFilter] = Field(default_factory=dict)
+    dedup: DedupConfig = Field(default_factory=DedupConfig)
     respect_robots: bool = True
     request_delay_ms: int = 500
     max_concurrent_per_domain: int = 2

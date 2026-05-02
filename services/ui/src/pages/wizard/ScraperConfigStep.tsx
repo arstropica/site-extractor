@@ -148,6 +148,7 @@ export default function ScraperConfigStep({ onSubmit, initialConfig, initialName
   const [resourceFilters, setResourceFilters] = useState<Record<string, ResourceFilterConfig>>(
     initialConfig?.resource_filters ?? { ...DEFAULT_RESOURCE_FILTERS }
   )
+  const [dedupEnabled, setDedupEnabled] = useState(initialConfig?.dedup?.enabled ?? false)
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -163,6 +164,7 @@ export default function ScraperConfigStep({ onSubmit, initialConfig, initialName
         path_filters: pathFilters.split('\n').map((p) => p.trim()).filter(Boolean),
       },
       resource_filters: resourceFilters,
+      dedup: { enabled: dedupEnabled },
       respect_robots: respectRobots,
       request_delay_ms: requestDelay,
       max_concurrent_per_domain: maxPerDomain,
@@ -421,6 +423,37 @@ export default function ScraperConfigStep({ onSubmit, initialConfig, initialName
             <span className="icon-[tabler--plus] size-4" />
             Add Category
           </button>
+        </div>
+      </section>
+
+      {/* Duplicates */}
+      <section className="space-y-4">
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-base-content/60">
+          Duplicates
+        </h3>
+        <div className="bg-base-200/50 rounded-xl p-4 space-y-3">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              className="toggle toggle-primary toggle-sm"
+              checked={dedupEnabled}
+              onChange={(e) => setDedupEnabled(e.target.checked)}
+            />
+            <span className="label-text text-sm">Skip duplicate downloads</span>
+          </label>
+          <p className="text-xs text-base-content/60">
+            Skip downloading resources that are already saved in this scrape.
+            Reduces disk usage when a site reuses identical assets across pages.
+          </p>
+          <div className="flex items-start gap-2 text-xs text-warning/90">
+            <span className="icon-[tabler--alert-triangle] size-4 shrink-0 mt-0.5" />
+            <p>
+              When enabled, URLs that share content with another URL won't be
+              saved as separate files. References to those URLs in extracted
+              data will fail to resolve, and downstream consumers expecting
+              them will see 404s.
+            </p>
+          </div>
         </div>
       </section>
 

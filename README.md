@@ -17,7 +17,7 @@ A self-hosted Docker Compose application for crawling websites and extracting st
 - **Point-and-click content mapper** — Scraped pages render in a sandboxed iframe with an injected picker that generates CSS selectors and live-highlights matches.
 - **Schema templates** — Reusable schemas with built-in templates (Article/Blog, Product Listing, Person Profile) editable in either a visual tree builder or a raw JSON editor.
 - **Cross-page record merging** — `merge_by` + `url_regex` collapse multiple pages-per-entity (e.g., separate Overview / Bio / GameLog tabs) into single merged records keyed by an extracted ID.
-- **Resource filtering** — Per-category include/exclude with extension lists; HEAD-first probing with size guards and content-hash deduplication.
+- **Resource filtering** — Per-category include/exclude with extension lists; HEAD-first probing with size guards. Opt-in content-hash deduplication trades fidelity for disk savings (default off so every URL the page references produces its own row and file).
 - **Authentication** — Basic, Bearer token, or cookie injection per job. Credentials are Fernet-encrypted at rest with `enc:v1:` versioning. Browser-driven login is deferred to v2.
 - **Domain allowlist + path filters** — Strict domain match with wildcard support; cross-domain redirects are recorded but not followed.
 - **Real-time progress** — WebSocket relay of scraper / extraction events: page tree updates, resource discovery, progress, status changes, errors.
@@ -323,6 +323,7 @@ Several environment defaults can be overridden per job via the `scrape_config` p
 - `retry_limit` — overrides `SCRAPER_RETRY_LIMIT`
 - `request_delay_ms`, `max_concurrent_per_domain`, `max_concurrent_total` — rate limiting
 - `respect_robots`, `user_agent`, `auth`, `domain_filter`, `resource_filters` — crawl behavior
+- `dedup.enabled` — when `true`, skip downloading a resource whose bytes match a file already saved in this scrape (default `false`; see Troubleshooting → "Crawl skipping files" for the fidelity trade-off)
 
 Defaults are defined in `services/shared/models.py` (`ScrapeConfig`) and `DEFAULT_RESOURCE_FILTERS`.
 
@@ -378,6 +379,7 @@ The scraper container has a 30-second `start_period` because Playwright Chromium
 - Check the **Resource Filters** for the job — non-HTML extensions (e.g. `m4v`, `pdf`) need to be in an enabled category.
 - Check `MAX_ASSET_SIZE` — files larger than this are skipped during HEAD probe. Bump it for media-heavy crawls (e.g. `MAX_ASSET_SIZE=262144000` for 250 MB).
 - Check `respect_robots` — sites often disallow asset paths in `robots.txt`.
+- Check the **Duplicates** toggle — when on, two URLs serving identical bytes only save the first one (the second has no row, no file, no event). References to the duplicate URL in extracted data won't resolve. Turn it off if downstream consumers expect every URL the page references to produce a fetchable resource.
 
 ### Stored credentials fail to decrypt
 

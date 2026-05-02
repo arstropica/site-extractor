@@ -142,12 +142,17 @@ export interface ResourceFilterConfig {
   exclude_extensions: string[]
 }
 
+export interface DedupConfig {
+  enabled: boolean
+}
+
 export interface ScrapeConfig {
   seed_urls: string[]
   crawl_mode: CrawlMode
   depth_limit: number
   domain_filter: DomainFilter
   resource_filters: Record<string, ResourceFilterConfig>
+  dedup: DedupConfig
   respect_robots: boolean
   request_delay_ms: number
   max_concurrent_per_domain: number

@@ -206,6 +206,13 @@ class Crawler:
         retry_limit = config.get("retry_limit")
         if retry_limit is None:
             retry_limit = settings.SCRAPER_RETRY_LIMIT
+        # Content-hash dedup: opt-in. When enabled, the second URL whose bytes
+        # match an already-saved file in this run is silently dropped (no row,
+        # no file, no event). Default off so every URL captured by the page
+        # produces a resolvable resource — references in extracted data don't
+        # silently 404. See ScraperConfigStep.tsx "Duplicates" section for the
+        # user-facing caveat.
+        dedup_enabled = bool(config.get("dedup", {}).get("enabled", False))
 
         # Seed the queue if fresh start
         if not state.queued_urls and not state.visited_urls:
@@ -301,6 +308,7 @@ class Crawler:
                 self._max_per_domain = max_per_domain
                 self._max_total = max_total
                 self._retry_limit = retry_limit
+                self._dedup_enabled = dedup_enabled
                 self._state_lock = asyncio.Lock()
 
                 # Sliding-window dispatcher: keep up to max_total tasks in flight,
@@ -898,9 +906,10 @@ class Crawler:
                         content_hash = sidecar.get("content_hash")
                         if not content_hash:
                             content_hash = storage.content_hash(cached_asset.read_bytes())
-                        if content_hash in state.downloaded_hashes:
-                            return
-                        state.downloaded_hashes.add(content_hash)
+                        if self._dedup_enabled:
+                            if content_hash in state.downloaded_hashes:
+                                return
+                            state.downloaded_hashes.add(content_hash)
                         # Refresh sidecar's HEAD-confirmed metadata
                         refreshed = self._extract_freshness_meta(head_headers, size)
                         refreshed.update({
@@ -997,10 +1006,15 @@ class Crawler:
 
             content_hash = storage.content_hash(content)
 
-            # Dedup check (atomic via asyncio's single-thread guarantee)
-            if content_hash in state.downloaded_hashes:
-                return
-            state.downloaded_hashes.add(content_hash)
+            # Dedup check — opt-in via scrape_config.dedup.enabled. When the
+            # flag is off (default), every URL produces its own row + file
+            # even when bytes collide with another URL's content; this keeps
+            # references in extracted data resolvable. The flag exists so a
+            # user who values disk savings over per-URL fidelity can opt in.
+            if self._dedup_enabled:
+                if content_hash in state.downloaded_hashes:
+                    return
+                state.downloaded_hashes.add(content_hash)
 
             # Persist the freshness sidecar alongside the asset, preferring
             # HEAD headers (more reliable for streaming responses) and falling
