@@ -24,6 +24,14 @@ from bs4 import BeautifulSoup, Tag
 logger = logging.getLogger(__name__)
 
 
+# Sentinel for "extracted value is a scraper-rewritten ../assets/<name>
+# reference but the file is missing on disk." Distinguished from None
+# (genuine no-match / empty value) so callers can drop these from
+# arrays rather than leave holes. See _extract_leaf and
+# _extract_leaf_array for the propagation rules.
+_MISSING_ASSET = object()
+
+
 class ExtractionEngine:
     def __init__(self, data_dir: str):
         self.data_dir = Path(data_dir)
@@ -187,14 +195,23 @@ class ExtractionEngine:
 
             for resource in resources:
                 filename = resource.get("filename", "")
-                if compiled.search(filename):
-                    result[key].append({
-                        "filename": filename,
-                        "path": resource.get("local_path", ""),
-                        "size": resource.get("size", 0),
-                        "mime": resource.get("mime_type", ""),
-                        "url": resource.get("url", ""),
-                    })
+                if not compiled.search(filename):
+                    continue
+                local_path = resource.get("local_path", "")
+                disk_path = self.data_dir / "jobs" / job_id / local_path
+                if not local_path or not disk_path.is_file():
+                    logger.warning(
+                        "Skipping missing resource for file_pattern '%s': %s (expected at %s)",
+                        key, filename, disk_path,
+                    )
+                    continue
+                result[key].append({
+                    "filename": filename,
+                    "path": local_path,
+                    "size": resource.get("size", 0),
+                    "mime": resource.get("mime_type", ""),
+                    "url": resource.get("url", ""),
+                })
 
         return result
 
@@ -398,7 +415,12 @@ class ExtractionEngine:
         else:
             el = scope_el
 
-        return self._extract_value(el, attribute, field_type, page_url, job_id)
+        value = self._extract_value(el, attribute, field_type, page_url, job_id)
+        # Scalar context: a missing asset becomes a null field, not the
+        # internal sentinel. Sentinel only travels back to array callers.
+        if value is _MISSING_ASSET:
+            return None
+        return value
 
     def _extract_leaf_array(
         self,
@@ -434,13 +456,21 @@ class ExtractionEngine:
             for el in elements:
                 header = headers.get(self._cell_index(el))
                 value = self._extract_value(el, attribute, field_type, page_url, job_id)
+                if value is _MISSING_ASSET:
+                    # Drop the row entirely — a missing asset doesn't
+                    # belong in the output as a null cell either.
+                    continue
                 results.append({"header": header, "value": value})
             return results
 
-        return [
+        values = [
             self._extract_value(el, attribute, field_type, page_url, job_id)
             for el in elements
         ]
+        # Drop missing-asset sentinels from the array. None is preserved
+        # so callers can distinguish "DOM matched, value was empty" from
+        # "DOM matched, asset missing" — only the latter is filtered.
+        return [v for v in values if v is not _MISSING_ASSET]
 
     def _table_headers_for_row(self, scope_el: Tag, elements: List[Tag]) -> Optional[Dict[int, str]]:
         """Return {column_index: header_text} if elements look like row cells with column headers.
@@ -511,6 +541,28 @@ class ExtractionEngine:
         if not raw:
             return None
 
+        # Disk-check ../assets/<name> references regardless of field
+        # type. The scraper writes this prefix into HTML for every
+        # <img>/<link>/style URL it rewrites — whether or not the asset
+        # was successfully saved. Sources of divergence: silently-skipped
+        # dedup hits, blocked filters, fetch failures, or simply
+        # references that didn't exist on the source server. The
+        # extractor must verify the file exists on disk before emitting
+        # the reference; otherwise consumers see dangling URLs that 404.
+        raw_str = str(raw)
+        if raw_str.startswith("../assets/"):
+            rel = raw_str[len("../assets/"):]
+            # On-disk filenames are URL-derived; query/fragment are
+            # never part of the path and must be stripped before is_file.
+            rel_clean = rel.split("?", 1)[0].split("#", 1)[0]
+            asset_path = self.data_dir / "jobs" / job_id / "assets" / rel_clean
+            if not asset_path.is_file():
+                logger.warning(
+                    "Skipping missing asset on %s: %s (expected at %s)",
+                    page_url, raw_str, asset_path,
+                )
+                return _MISSING_ASSET
+
         if field_type == "number":
             # Extract numeric value from text
             cleaned = re.sub(r"[^\d.\-]", "", str(raw))
@@ -520,13 +572,12 @@ class ExtractionEngine:
                 return None
 
         elif field_type == "image":
-            # Resolve relative URL and store locally.
-            # `../assets/<name>` is the rewrite that page_storage applies
-            # to inline asset references when saving HTML — we translate
-            # it to the gateway's external asset endpoint so consumers
-            # reading these results can fetch the file directly without
-            # knowing the on-disk layout.
-            src = str(raw)
+            # Resolve to a fetchable URL. `../assets/<name>` is the
+            # scraper's rewrite for downloaded assets; existence on disk
+            # was already verified above. We translate to the gateway's
+            # asset endpoint so consumers can fetch without knowing the
+            # on-disk layout.
+            src = raw_str
             if src.startswith("../assets/"):
                 return src.replace("../assets/", f"/api/asset/{job_id}/assets/")
             elif src.startswith(("http://", "https://")):
