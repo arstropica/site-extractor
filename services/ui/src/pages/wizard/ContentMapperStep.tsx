@@ -320,16 +320,31 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
     ? fieldMappings.some((m) => m.selector)
     : filePatterns.some((p) => p.schema_key && p.regex_pattern)
 
+  // Compose a selector with a boundary scope prefix. The engine evaluates
+  // a count_selector relative to its boundary element via Soup Sieve's
+  // scope-implicit select(); for the live count badge we approximate by
+  // prefixing with the cumulative boundary path so validate-selector hits
+  // the same DOM region. ":scope " stripping is unnecessary because we
+  // never compose ":scope"-prefixed user inputs (the engine handles those
+  // server-side); whatever the user types here is taken at face value.
+  function composeWithScope(scopePrefix: string, sel: string): string {
+    if (!sel) return sel
+    const prefix = scopePrefix.trim()
+    if (!prefix) return sel
+    return `${prefix} ${sel.trim()}`
+  }
+
   // IteratorPanel renders the row of iterators for a given scope (root or
   // a per-boundary collection). Inlined to share component state easily.
   function renderIteratorPanel(opts: {
     scopeLabel: string
+    scopePrefix: string  // boundary path the iterator is declared under
     iterators: Iterator[]
     onAdd: () => void
     onUpdate: (idx: number, updates: Partial<Iterator>) => void
     onRemove: (idx: number) => void
   }) {
-    const { iterators: list, onAdd, onUpdate, onRemove } = opts
+    const { scopePrefix, iterators: list, onAdd, onUpdate, onRemove } = opts
     const usedNames = new Set(list.map((it) => it.name))
 
     return (
@@ -356,6 +371,7 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
             usedNames={usedNames}
             leafPaths={leafFields.map(({ path }) => path)}
             jobId={jobId}
+            scopedSelector={composeWithScope(scopePrefix, it.count_selector)}
             onUpdate={(updates) => onUpdate(idx, updates)}
             onRemove={() => onRemove(idx)}
           />
@@ -449,6 +465,7 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
             <div className="border-t border-base-content/5 pt-3">
               {renderIteratorPanel({
                 scopeLabel: 'root',
+                scopePrefix: rootBoundary,
                 iterators: rootIterators,
                 onAdd: addRootIterator,
                 onUpdate: updateRootIterator,
@@ -564,6 +581,12 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
                           <div className="border-t border-base-content/5 pt-2">
                             {renderIteratorPanel({
                               scopeLabel: path,
+                              // Cumulative scope: root + this boundary. The engine
+                              // resolves count_selector against the boundary element,
+                              // which is itself nested inside root_boundary.
+                              scopePrefix: [rootBoundary, bm?.boundary ?? '']
+                                .filter(Boolean)
+                                .join(' '),
                               iterators: bm?.iterators ?? [],
                               onAdd: () => addBoundaryIterator(path),
                               onUpdate: (idx, updates) => updateBoundaryIterator(path, idx, updates),
@@ -713,17 +736,20 @@ interface IteratorRowProps {
   usedNames: Set<IteratorName>
   leafPaths: string[]
   jobId: string
+  scopedSelector: string  // count_selector composed with the boundary scope prefix
   onUpdate: (updates: Partial<Iterator>) => void
   onRemove: () => void
 }
 
 const ITERATOR_NAMES: IteratorName[] = ['i', 'j', 'k']
 
-function IteratorRow({ iterator, usedNames, leafPaths, jobId, onUpdate, onRemove }: IteratorRowProps) {
+function IteratorRow({ iterator, usedNames, leafPaths, jobId, scopedSelector, onUpdate, onRemove }: IteratorRowProps) {
   const [matchCount, setMatchCount] = useState<number | null>(null)
   const [matchError, setMatchError] = useState<string | null>(null)
 
-  // Live count: hit validate-selector when count_selector changes (debounced).
+  // Live count: hit validate-selector when the (scoped) count_selector
+  // changes. Scoped means prefixed with the boundary path so the count
+  // reflects only matches inside the relevant region — not the whole page.
   useEffect(() => {
     if (!iterator.count_selector || !jobId) {
       setMatchCount(null)
@@ -732,7 +758,7 @@ function IteratorRow({ iterator, usedNames, leafPaths, jobId, onUpdate, onRemove
     }
     const handle = setTimeout(async () => {
       try {
-        const res = await extractionApi.validateSelector(jobId, iterator.count_selector, 1)
+        const res = await extractionApi.validateSelector(jobId, scopedSelector, 1)
         if (res.error) {
           setMatchError(res.error)
           setMatchCount(null)
@@ -746,7 +772,7 @@ function IteratorRow({ iterator, usedNames, leafPaths, jobId, onUpdate, onRemove
       }
     }, 350)
     return () => clearTimeout(handle)
-  }, [iterator.count_selector, jobId])
+  }, [scopedSelector, jobId, iterator.count_selector])
 
   const anchorList = (() => {
     const a = iterator.anchor
