@@ -12,6 +12,7 @@ The engine uses a cumulative boundary model:
 """
 
 import hashlib
+import itertools
 import logging
 import re
 import shutil
@@ -30,6 +31,45 @@ logger = logging.getLogger(__name__)
 # arrays rather than leave holes. See _extract_leaf and
 # _extract_leaf_array for the propagation rules.
 _MISSING_ASSET = object()
+
+
+_LEADING_COMBINATORS = (">", "+", "~")
+
+
+def _normalize_selector(s: str) -> str:
+    """Prepend ':scope ' when a selector starts with a top-level combinator.
+
+    Soup Sieve rejects leading-combinator selectors at the top level (same
+    rule browsers enforce in querySelectorAll). Users intuitively expect
+    '> tr' to mean 'direct child of the matched element'; this normalization
+    makes that work by injecting ':scope '. Selectors that don't start with
+    a combinator are returned unchanged.
+    """
+    if not s:
+        return s
+    stripped = s.lstrip()
+    if stripped and stripped[0] in _LEADING_COMBINATORS:
+        return f":scope {stripped}"
+    return s
+
+
+def _resolve_selector(s: str, subs: Optional[Dict[str, int]] = None) -> str:
+    """Apply iterator-index substitution then normalize.
+
+    `subs` is a dict of {iterator_name: index} bindings to apply via
+    `str.format(**subs)`. If the selector contains no placeholders or `subs`
+    is empty/None, this is equivalent to `_normalize_selector(s)`. KeyError
+    or IndexError during substitution leaves the selector as-is — caller
+    can decide whether the resulting (still-templated) selector is an error.
+    """
+    if not s:
+        return s
+    if subs:
+        try:
+            s = s.format(**subs)
+        except (KeyError, IndexError, ValueError):
+            pass
+    return _normalize_selector(s)
 
 
 class ExtractionEngine:
@@ -53,6 +93,7 @@ class ExtractionEngine:
         url_pattern = doc_config.get("url_pattern")
         boundaries = {b["field_path"]: b for b in doc_config.get("boundaries", [])}
         field_mappings = doc_config.get("field_mappings", [])
+        root_iterators = doc_config.get("iterators", [])
 
         # Build a lookup: field_path -> FieldMapping
         mapping_lookup: Dict[str, Dict[str, Any]] = {}
@@ -84,23 +125,23 @@ class ExtractionEngine:
 
             # Find root scope elements
             if root_boundary:
-                scope_elements = body.select(root_boundary)
+                scope_elements = body.select(_normalize_selector(root_boundary))
             else:
                 scope_elements = [body]
 
             for scope_el in scope_elements:
-                record = self._extract_record(
-                    scope_el, schema_tree, mapping_lookup, boundaries,
-                    parent_path="", page_url=page.get("url", ""),
-                    job_id=job_id,
-                )
-                results.append({
-                    "page_url": page.get("url"),
-                    "data": record,
-                })
+                for record in self._iter_records(
+                    scope_el, root_iterators, schema_tree, mapping_lookup,
+                    boundaries, parent_path="", page_url=page.get("url", ""),
+                    job_id=job_id, base_subs={},
+                ):
+                    results.append({
+                        "page_url": page.get("url"),
+                        "data": record,
+                    })
 
-                if limit and len(results) >= limit:
-                    return self._maybe_merge(results, doc_config)
+                    if limit and len(results) >= limit:
+                        return self._maybe_merge(results, doc_config)
 
         return self._maybe_merge(results, doc_config)
 
@@ -242,7 +283,7 @@ class ExtractionEngine:
             pages_checked += 1
 
             try:
-                matches = body.select(selector)
+                matches = body.select(_normalize_selector(selector))
             except Exception:
                 return {
                     "selector": selector,
@@ -277,6 +318,127 @@ class ExtractionEngine:
 
     # ── Internal extraction helpers ───────────────────────────────────────
 
+    def _iter_records(
+        self,
+        scope_el: Tag,
+        iterators: List[Dict[str, Any]],
+        schema_tree: List[Dict],
+        mapping_lookup: Dict[str, Dict],
+        boundaries: Dict[str, Dict],
+        parent_path: str,
+        page_url: str,
+        job_id: str,
+        base_subs: Dict[str, int],
+    ) -> List[Dict[str, Any]]:
+        """Expand iterators into per-iteration records (Cartesian product).
+
+        With no iterators, returns a one-element list containing the single
+        record extracted from `scope_el`. With iterators, evaluates each
+        count selector against the scope, loops indices, substitutes them
+        into selector templates during extraction, and applies the anchor-skip
+        rule per iteration.
+        """
+        if not iterators:
+            return [self._extract_record(
+                scope_el, schema_tree, mapping_lookup, boundaries,
+                parent_path, page_url, job_id, base_subs,
+            )]
+
+        # Evaluate count for each iterator (relative to scope_el; parent
+        # subs available for nested cases).
+        counts: List[tuple] = []  # [(name, n), ...]
+        for it in iterators:
+            sel = _resolve_selector(it["count_selector"], base_subs)
+            try:
+                n = len(scope_el.select(sel))
+            except Exception as e:
+                logger.warning(f"Iterator count selector failed: {sel!r}: {e}")
+                return []
+            if n == 0:
+                return []
+            counts.append((it["name"], n))
+
+        records: List[Dict[str, Any]] = []
+        ranges = [range(1, n + 1) for _, n in counts]
+        for combo in itertools.product(*ranges):
+            subs = dict(base_subs)
+            for (name, _), idx in zip(counts, combo):
+                subs[name] = idx
+
+            if self._iteration_skipped(iterators, scope_el, subs, mapping_lookup, schema_tree, parent_path):
+                continue
+
+            records.append(self._extract_record(
+                scope_el, schema_tree, mapping_lookup, boundaries,
+                parent_path, page_url, job_id, subs,
+            ))
+        return records
+
+    def _iteration_skipped(
+        self,
+        iterators: List[Dict[str, Any]],
+        scope_el: Tag,
+        subs: Dict[str, int],
+        mapping_lookup: Dict[str, Dict],
+        schema_tree: List[Dict],
+        parent_path: str,
+    ) -> bool:
+        """Apply anchor-skip rule. Returns True if this iteration should be dropped.
+
+        For each iterator, identify its anchor field(s) — explicit list, single
+        string, or default (first declared field at this scope). Skip the
+        iteration when ALL listed anchor fields produce empty content
+        (OR-of-presence: keep the record if ANY anchor has content).
+        """
+        for it in iterators:
+            anchor = it.get("anchor")
+            if anchor is None:
+                # Default: first field at this scope level.
+                first = schema_tree[0] if schema_tree else None
+                if not first:
+                    continue
+                first_name = first["name"]
+                anchor_paths = [
+                    f"{parent_path}.{first_name}" if parent_path else first_name
+                ]
+            elif isinstance(anchor, str):
+                anchor_paths = [anchor]
+            else:
+                anchor_paths = list(anchor)
+
+            if all(self._anchor_empty(path, scope_el, subs, mapping_lookup)
+                   for path in anchor_paths):
+                return True
+        return False
+
+    def _anchor_empty(
+        self,
+        field_path: str,
+        scope_el: Tag,
+        subs: Dict[str, int],
+        mapping_lookup: Dict[str, Dict],
+    ) -> bool:
+        """True if the anchor field's substituted selector yields no content."""
+        mapping = mapping_lookup.get(field_path)
+        if not mapping:
+            return True
+        sel = mapping.get("selector")
+        if not sel:
+            return True
+        # url_regex anchors are page-scoped, not iteration-scoped — never empty
+        # from iteration perspective.
+        if mapping.get("url_regex"):
+            return False
+        try:
+            el = scope_el.select_one(_resolve_selector(sel, subs))
+        except Exception:
+            return True
+        if el is None:
+            return True
+        text = el.get_text(strip=True)
+        # &nbsp; (U+00A0) collapses to non-empty — treat it as empty.
+        return text == "" or text == "\xa0"
+
     def _extract_record(
         self,
         scope_el: Tag,
@@ -286,9 +448,11 @@ class ExtractionEngine:
         parent_path: str,
         page_url: str,
         job_id: str,
+        index_subs: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
         """Extract a single record from a DOM scope element."""
         record: Dict[str, Any] = {}
+        subs = index_subs or {}
 
         for field in schema_tree:
             field_name = field["name"]
@@ -302,18 +466,19 @@ class ExtractionEngine:
                 boundary_config = boundaries.get(field_path, {})
                 boundary_selector = boundary_config.get("boundary")
                 iterator_selector = boundary_config.get("iterator")
+                nested_iterators = boundary_config.get("iterators", [])
 
                 if is_array:
                     # Collection: iterate over elements
                     record[field_name] = self._extract_collection(
                         scope_el, boundary_selector, iterator_selector,
-                        children, mapping_lookup, boundaries,
-                        field_path, page_url, job_id,
+                        nested_iterators, children, mapping_lookup, boundaries,
+                        field_path, page_url, job_id, subs,
                     )
                 else:
                     # Nested record: narrow scope
                     if boundary_selector:
-                        nested_el = scope_el.select_one(boundary_selector)
+                        nested_el = scope_el.select_one(_resolve_selector(boundary_selector, subs))
                         if not nested_el:
                             record[field_name] = {}
                             continue
@@ -322,7 +487,7 @@ class ExtractionEngine:
 
                     record[field_name] = self._extract_record(
                         nested_el, children, mapping_lookup, boundaries,
-                        field_path, page_url, job_id,
+                        field_path, page_url, job_id, subs,
                     )
             else:
                 # Leaf field
@@ -341,12 +506,12 @@ class ExtractionEngine:
                 elif is_array:
                     record[field_name] = self._extract_leaf_array(
                         scope_el, selector, attribute, field_type,
-                        page_url, job_id,
+                        page_url, job_id, subs,
                     )
                 else:
                     record[field_name] = self._extract_leaf(
                         scope_el, selector, attribute, field_type,
-                        page_url, job_id,
+                        page_url, job_id, subs,
                     )
 
         return record
@@ -356,25 +521,40 @@ class ExtractionEngine:
         scope_el: Tag,
         boundary_selector: Optional[str],
         iterator_selector: Optional[str],
+        nested_iterators: List[Dict[str, Any]],
         children: List[Dict],
         mapping_lookup: Dict[str, Dict],
         boundaries: Dict[str, Dict],
         field_path: str,
         page_url: str,
         job_id: str,
+        index_subs: Dict[str, int],
     ) -> List[Dict[str, Any]]:
-        """Extract a collection (array of records) from the DOM."""
+        """Extract a collection (array of records) from the DOM.
+
+        Three modes, in priority order:
+          1. nested_iterators set — fan out via _iter_records (new primitive)
+          2. iterator_selector set — repeating-element selector (existing)
+          3. neither — treat container as a single element
+        """
         # Determine the scope for iteration
         if boundary_selector:
-            container = scope_el.select_one(boundary_selector)
+            container = scope_el.select_one(_resolve_selector(boundary_selector, index_subs))
             if not container:
                 return []
         else:
             container = scope_el
 
-        # Find iterator elements
+        # New: iterator-based fan-out (column-projected layouts etc.)
+        if nested_iterators:
+            return self._iter_records(
+                container, nested_iterators, children, mapping_lookup,
+                boundaries, field_path, page_url, job_id, index_subs,
+            )
+
+        # Existing: repeating-element selector
         if iterator_selector:
-            elements = container.select(iterator_selector)
+            elements = container.select(_resolve_selector(iterator_selector, index_subs))
         else:
             # No iterator — treat the container itself as a single element
             elements = [container]
@@ -383,7 +563,7 @@ class ExtractionEngine:
         for el in elements:
             item = self._extract_record(
                 el, children, mapping_lookup, boundaries,
-                field_path, page_url, job_id,
+                field_path, page_url, job_id, index_subs,
             )
             items.append(item)
 
@@ -397,15 +577,17 @@ class ExtractionEngine:
         field_type: str,
         page_url: str,
         job_id: str,
+        index_subs: Optional[Dict[str, int]] = None,
     ) -> Any:
         """Extract a single leaf value from the DOM."""
+        subs = index_subs or {}
         if selector:
             # Support disjunctions: "a.link | span.alt"
             parts = [s.strip() for s in selector.split("|")]
             el = None
             for part in parts:
                 try:
-                    el = scope_el.select_one(part)
+                    el = scope_el.select_one(_resolve_selector(part, subs))
                 except Exception:
                     continue
                 if el:
@@ -430,6 +612,7 @@ class ExtractionEngine:
         field_type: str,
         page_url: str,
         job_id: str,
+        index_subs: Optional[Dict[str, int]] = None,
     ) -> List[Any]:
         """Extract multiple leaf values (array of primitives).
 
@@ -440,12 +623,12 @@ class ExtractionEngine:
         """
         if not selector:
             return []
-
+        subs = index_subs or {}
         parts = [s.strip() for s in selector.split("|")]
         elements = []
         for part in parts:
             try:
-                elements.extend(scope_el.select(part))
+                elements.extend(scope_el.select(_resolve_selector(part, subs)))
             except Exception:
                 continue
 

@@ -7,7 +7,7 @@ extraction service, and UI.
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal, Union
 from pydantic import BaseModel, Field
 import uuid
 
@@ -200,11 +200,32 @@ class FieldMapping(BaseModel):
     url_regex: Optional[str] = None  # if set, value = capture group 1 of regex against page URL
 
 
+IteratorName = Literal["i", "j", "k"]
+
+
+class Iterator(BaseModel):
+    """Named index iterator for non-encapsulated record layouts.
+
+    Records are produced by looping an integer over 1..N (where N is the
+    match count of count_selector evaluated against the boundary scope) and
+    substituting {name} into field selector templates. See
+    docs/iterative-boundary-design.md.
+    """
+    name: IteratorName
+    count_selector: str
+    # Anchor field(s) — if every listed field's substituted selector returns
+    # nothing/empty for an iteration, that iteration is skipped (record not
+    # emitted). Single string is sugar for a one-element list. Default
+    # behavior (anchor=None) skips when ALL fields are empty.
+    anchor: Optional[Union[str, List[str]]] = None
+
+
 class BoundaryMapping(BaseModel):
     """Defines a boundary scope for a record or collection in the schema."""
     field_path: str              # dot-notation path to the record/collection field
     boundary: Optional[str] = None  # CSS selector narrowing scope; None = inherit parent
     iterator: Optional[str] = None  # for collections: selector for each repeated element
+    iterators: List[Iterator] = Field(default_factory=list)  # iterative-boundary primitive
 
 
 class DocumentExtractionConfig(BaseModel):
@@ -213,6 +234,7 @@ class DocumentExtractionConfig(BaseModel):
     url_pattern: Optional[str] = None    # only apply to pages matching this pattern
     boundaries: List[BoundaryMapping] = Field(default_factory=list)
     field_mappings: List[FieldMapping] = Field(default_factory=list)
+    iterators: List[Iterator] = Field(default_factory=list)  # root-scope iterators
     # Optional: collapse multiple records into one by grouping on a field value.
     # Useful when the same logical entity appears across multiple URLs (e.g.,
     # player Overview/Bio/GameLog tabs).
