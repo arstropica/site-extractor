@@ -13,6 +13,7 @@ A self-hosted Docker Compose application for crawling websites and extracting st
 - **Two-phase pipeline** — Phase 1 spiders the site to a local mirror; Phase 2 extracts structured data from stored pages. Phases are decoupled so mappings can be rebuilt without re-crawling.
 - **Two crawl modes** — Lightweight HTTP via httpx, or headless Chromium via Playwright for SPA / JavaScript-rendered content.
 - **Boundary-scoped extraction** — Cumulative CSS selector boundaries (root → record → collection iterator) handle nested and repeating layouts. Mappings live per-job; schemas are reusable.
+- **Iterative boundaries for non-encapsulated layouts** — Index-variable iterators (`{i}`/`{j}`/`{k}`) handle records projected along axes with no shared DOM ancestor (column-projected tables, transposed grids). Each iterator declares a DOM-derived `count_selector` and an optional anchor field for skipping sparse iterations. See `CLAUDE.md` for the contract.
 - **File-based extraction** — Regex-categorized filename listing for asset-heavy crawls (PDFs, media, archives).
 - **Point-and-click content mapper** — Scraped pages render in a sandboxed iframe with an injected picker that generates CSS selectors and live-highlights matches.
 - **Schema templates** — Reusable schemas with built-in templates (Article/Blog, Product Listing, Person Profile) editable in either a visual tree builder or a raw JSON editor.

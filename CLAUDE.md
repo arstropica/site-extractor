@@ -108,6 +108,52 @@ Both block illegal writes. The pre-checks exist because they're more useful to t
 
 ---
 
+## Iterative boundary mapping
+
+For sites whose records are projected along an axis with no shared DOM ancestor (e.g., column-projected records across separate `<tr>` parents in legacy table layouts), the structural-boundary model alone is insufficient — CSS lacks a "zip these by index" operator. Boundaries can declare **iterators**: named index variables, bounded by a DOM-derived count, used as `{name}` substitution tokens in field selector templates.
+
+### Mechanics
+
+```yaml
+root_boundary: "table[border='7']"
+iterators:
+  - name: i
+    count_selector: "tr:first-of-type > td"
+    anchor: title
+field_mappings:
+  - title:   "tr:nth-of-type(1) > td:nth-of-type({i}) span"
+  - details: "tr:nth-of-type(2) > td:nth-of-type({i}) blockquote"
+  - images:  "tr:nth-of-type(3) > td:nth-of-type({i}) img"   # attribute=src
+```
+
+For each `root_boundary` match, `count_selector` is evaluated relative to the boundary element to determine `N`. `i` then loops `1..N`, substituted into every field selector via `str.format(**subs)` before extraction. Result: `N` records per boundary match.
+
+### Rules
+
+- **Names are a closed set**: `i`, `j`, `k`. The Python model uses `Literal["i", "j", "k"]`; the UI dropdown enforces it. Three is enough for any reasonable layout (single iteration, Cartesian, rare 3D); more is a code smell that should prompt restructuring boundaries rather than adding a fourth name.
+- **Multiple iterators per boundary** yield Cartesian iteration in declaration order (outer first). N×M records per boundary match.
+- **Iterators are valid at every boundary depth**, not just the root. A nested collection boundary may declare its own iterators. Names scope per-boundary and may shadow outer scopes.
+- **Count source is always a DOM selector**. There is no manual count override. Reasoning: if the count cannot be expressed as a selector, the field selectors that have to navigate the same DOM are unlikely to survive the page either.
+- **Anchor-skip** suppresses iterations that don't represent real records. Each iterator may declare an `anchor` field path or list of paths: if every listed anchor's substituted selector yields empty content for an iteration, that iteration is dropped (no record emitted). Default anchor is the first declared field. Multi-anchor uses OR-of-presence — the record is kept when ANY anchor has content.
+- **Iterator-produced records flow through `_maybe_merge` unchanged**. Same `merge_by` semantics as records from the structural path; useful for combined cases (non-encapsulated layout AND per-entity data scattered across pages).
+
+### `:scope` auto-injection
+
+Soup Sieve rejects top-level combinator-leading selectors (`> tr`, `+ td`, `~ p`). The engine prepends `:scope ` automatically at every `select` / `select_one` call site (`_normalize_selector` → `_resolve_selector`). Applies uniformly to root boundary, count selectors, field selectors, and the existing `iterator` selector. Pure additive — no previously valid selector changes meaning.
+
+This is engine-wide, not iterator-specific. Users who prefer the explicit `:scope > tr` form may write it; users who write `> tr` get the same behavior.
+
+Practical caveat: BeautifulSoup injects implicit `<tbody>` into `<table>` parses, so `:scope > tr` against a `<table>` boundary returns nothing — `<tr>` is a grandchild. Use the implicit form (`tr:first-of-type`) or write the full path through `tbody`. The Content Mapper's live count badge surfaces these mismatches empirically: it scopes the count selector by the boundary path before validating, so the displayed count reflects what extraction will actually see.
+
+### Source pointers
+
+- **Engine**: `services/extraction-service/app/extractor/engine.py` — `_iter_records`, `_iteration_skipped`, `_anchor_empty`, `_normalize_selector`, `_resolve_selector`.
+- **Models**: `services/shared/models.py` — `Iterator`, `BoundaryMapping.iterators`, `DocumentExtractionConfig.iterators`.
+- **UI**: `services/ui/src/pages/wizard/ContentMapperStep.tsx` — `IteratorRow` subcomponent.
+- **Tests**: `tests/test_iterative_boundary.py` — substitution, anchor-skip, Cartesian, `merge_by` interaction; end-to-end fixture at `tests/fixtures/example_iterative.html`.
+
+---
+
 ## Failure attribution
 
 When `status='failed'`, `failed_stage` partitions the failure:
@@ -177,7 +223,7 @@ That's the entire surface. If you find yourself adding fields here for "UI step 
 
 ## Tests
 
-- **Python**: `pytest` from project root (uses `.venv/`). Covers `compute_pipeline_stages`, `next_stage_for_job`, and the legal-transition matrix. 104 cases at last count.
+- **Python**: `pytest` from project root (uses `.venv/`). Covers `compute_pipeline_stages`, `next_stage_for_job`, the legal-transition matrix, and the iterative-boundary engine (substitution, count discovery, anchor-skip, Cartesian, `merge_by` interaction). 138 cases at last count.
 - **TypeScript**: `npm test` in `services/ui`. Vitest, mirrors the same fixture table. 38 cases.
 
 Both suites must pass before any pipeline-state change ships. A drift in either implementation fails one suite or the other.
