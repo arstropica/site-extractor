@@ -156,6 +156,49 @@ class TestExampleColumnProjected:
         for r in results:
             assert r["data"]["performer"] == "carmen"
 
+    def test_array_field_with_url_regex_wraps_capture_in_list(self, tmp_path):
+        """An is_array=True field sourced from a single-capture url_regex
+        must yield [value], not the bare string. Otherwise downstream
+        consumers iterating the field char-by-char get a character-array
+        explosion (the bug this test guards against).
+        """
+        eng = _engine(tmp_path)
+        page = _stage_page(tmp_path, "job1", EXAMPLE_HTML, "member_videos_carmen.htm")
+        schema = [
+            *[f for f in SCHEMA_FIELDS if f["name"] != "performer"],
+            {"name": "performer", "field_type": "string", "is_array": True},
+        ]
+        results = eng.extract_from_pages(
+            job_id="job1",
+            pages=[page],
+            schema_fields=schema,
+            config=_example_config(),
+        )
+        assert results
+        for r in results:
+            assert r["data"]["performer"] == ["carmen"]
+
+    def test_array_field_with_url_regex_miss_yields_empty_list(self, tmp_path):
+        """When url_regex doesn't match, an array field still gets a list
+        (empty), not None — same shape contract.
+        """
+        eng = _engine(tmp_path)
+        # Page URL won't match member_videos_(\w+)\.htm
+        page = _stage_page(tmp_path, "job1", EXAMPLE_HTML, "other_page.htm")
+        schema = [
+            *[f for f in SCHEMA_FIELDS if f["name"] != "performer"],
+            {"name": "performer", "field_type": "string", "is_array": True},
+        ]
+        results = eng.extract_from_pages(
+            job_id="job1",
+            pages=[page],
+            schema_fields=schema,
+            config=_example_config(),
+        )
+        assert results
+        for r in results:
+            assert r["data"]["performer"] == []
+
     def test_first_record_has_three_images(self, tmp_path):
         eng = _engine(tmp_path)
         page = _stage_page(tmp_path, "job1", EXAMPLE_HTML, "member_videos_carmen.htm")

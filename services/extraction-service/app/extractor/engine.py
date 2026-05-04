@@ -502,7 +502,15 @@ class ExtractionEngine:
 
                 # url_regex source takes priority over selector
                 if url_regex:
-                    record[field_name] = self._extract_from_url(page_url, url_regex, field_type)
+                    value = self._extract_from_url(page_url, url_regex, field_type)
+                    if is_array:
+                        # Single-capture regex yields one scalar; an array
+                        # field expects a list. Wrap it (or empty-list a miss)
+                        # so consumers that iterate the field don't get a
+                        # character-by-character explosion of the string.
+                        record[field_name] = [value] if value is not None else []
+                    else:
+                        record[field_name] = value
                 elif is_array:
                     record[field_name] = self._extract_leaf_array(
                         scope_el, selector, attribute, field_type,
