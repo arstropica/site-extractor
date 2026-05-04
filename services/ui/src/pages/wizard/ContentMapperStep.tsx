@@ -4,6 +4,7 @@ import {
   pages as pagesApi,
   schemas as schemasApi,
   jobs as jobsApi,
+  extraction as extractionApi,
   type ScrapePage,
   type ExtractionMode,
   type ExtractionConfig,
@@ -11,6 +12,8 @@ import {
   type BoundaryMapping,
   type FilePattern,
   type SchemaField,
+  type Iterator,
+  type IteratorName,
 } from '@/api/client'
 import { useJobStore } from '@/stores/jobStore'
 import { useSchemaStore } from '@/stores/schemaStore'
@@ -57,6 +60,7 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
   const [boundaries, setBoundaries] = useState<BoundaryMapping[]>(savedDoc?.boundaries ?? [])
   const [fieldMappings, setFieldMappings] = useState<FieldMapping[]>(savedDoc?.field_mappings ?? [])
   const [filePatterns, setFilePatterns] = useState<FilePattern[]>(savedConfig?.file_patterns ?? [])
+  const [rootIterators, setRootIterators] = useState<Iterator[]>(savedDoc?.iterators ?? [])
 
   // Re-hydrate when activeJob changes (e.g., navigating from another job)
   const hydratedJobIdRef = useRef<string | null>(null)
@@ -73,6 +77,7 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
     setBoundaries(cfg.document?.boundaries ?? [])
     setFieldMappings(cfg.document?.field_mappings ?? [])
     setFilePatterns(cfg.file_patterns ?? [])
+    setRootIterators(cfg.document?.iterators ?? [])
     if (cfg.schema_id && cfg.schema_id !== schemaId) {
       setSchemaId(cfg.schema_id)
     }
@@ -233,6 +238,45 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
     })
   }
 
+  // Iterator helpers — same operations apply to root iterators and per-boundary
+  // iterators; the only difference is which array we mutate.
+  const addRootIterator = () => {
+    const used = new Set(rootIterators.map((it) => it.name))
+    const available: IteratorName[] = (['i', 'j', 'k'] as IteratorName[]).filter((n) => !used.has(n))
+    if (available.length === 0) return  // closed set; max 3
+    setRootIterators([...rootIterators, { name: available[0], count_selector: '', anchor: null }])
+  }
+  const updateRootIterator = (idx: number, updates: Partial<Iterator>) => {
+    setRootIterators((prev) => {
+      const next = [...prev]
+      next[idx] = { ...next[idx], ...updates }
+      return next
+    })
+  }
+  const removeRootIterator = (idx: number) => {
+    setRootIterators((prev) => prev.filter((_, i) => i !== idx))
+  }
+
+  const addBoundaryIterator = (path: string) => {
+    const bm = getBoundary(path)
+    const used = new Set((bm?.iterators ?? []).map((it) => it.name))
+    const available: IteratorName[] = (['i', 'j', 'k'] as IteratorName[]).filter((n) => !used.has(n))
+    if (available.length === 0) return
+    const newIt: Iterator = { name: available[0], count_selector: '', anchor: null }
+    updateBoundary(path, { iterators: [...(bm?.iterators ?? []), newIt] })
+  }
+  const updateBoundaryIterator = (path: string, idx: number, updates: Partial<Iterator>) => {
+    const bm = getBoundary(path)
+    const list = [...(bm?.iterators ?? [])]
+    list[idx] = { ...list[idx], ...updates }
+    updateBoundary(path, { iterators: list })
+  }
+  const removeBoundaryIterator = (path: string, idx: number) => {
+    const bm = getBoundary(path)
+    const list = (bm?.iterators ?? []).filter((_, i) => i !== idx)
+    updateBoundary(path, { iterators: list })
+  }
+
   // Build extraction config and save to job
   const handleRunExtraction = async () => {
     // Auto-save schema if not already persisted
@@ -256,6 +300,7 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
         merge_by: mergeBy || null,
         boundaries,
         field_mappings: fieldMappings.filter((m) => m.selector || m.url_regex),
+        iterators: rootIterators,
       } : null,
       file_patterns: mode === 'file' ? filePatterns : [],
     }
@@ -274,6 +319,50 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
   const hasValidMappings = mode === 'document'
     ? fieldMappings.some((m) => m.selector)
     : filePatterns.some((p) => p.schema_key && p.regex_pattern)
+
+  // IteratorPanel renders the row of iterators for a given scope (root or
+  // a per-boundary collection). Inlined to share component state easily.
+  function renderIteratorPanel(opts: {
+    scopeLabel: string
+    iterators: Iterator[]
+    onAdd: () => void
+    onUpdate: (idx: number, updates: Partial<Iterator>) => void
+    onRemove: (idx: number) => void
+  }) {
+    const { iterators: list, onAdd, onUpdate, onRemove } = opts
+    const usedNames = new Set(list.map((it) => it.name))
+
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <label className="label-text text-[10px] uppercase tracking-wider text-base-content/40">
+            Iterators <span className="text-base-content/30 normal-case">(non-encapsulated layouts)</span>
+          </label>
+          <button
+            type="button"
+            className="btn btn-ghost btn-xs gap-1"
+            onClick={onAdd}
+            disabled={list.length >= 3}
+            title={list.length >= 3 ? 'Max 3 iterators (i, j, k)' : 'Add iterator'}
+          >
+            <span className="icon-[tabler--plus] size-3" />
+            Add
+          </button>
+        </div>
+        {list.length === 0 ? null : list.map((it, idx) => (
+          <IteratorRow
+            key={idx}
+            iterator={it}
+            usedNames={usedNames}
+            leafPaths={leafFields.map(({ path }) => path)}
+            jobId={jobId}
+            onUpdate={(updates) => onUpdate(idx, updates)}
+            onRemove={() => onRemove(idx)}
+          />
+        ))}
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6">
@@ -355,6 +444,16 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
                   <option key={path} value={path}>{path}</option>
                 ))}
               </select>
+            </div>
+            {/* Root iterators — for non-encapsulated record layouts */}
+            <div className="border-t border-base-content/5 pt-3">
+              {renderIteratorPanel({
+                scopeLabel: 'root',
+                iterators: rootIterators,
+                onAdd: addRootIterator,
+                onUpdate: updateRootIterator,
+                onRemove: removeRootIterator,
+              })}
             </div>
           </div>
 
@@ -461,6 +560,17 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
                             </div>
                           )}
                         </div>
+                        {field.is_array && (
+                          <div className="border-t border-base-content/5 pt-2">
+                            {renderIteratorPanel({
+                              scopeLabel: path,
+                              iterators: bm?.iterators ?? [],
+                              onAdd: () => addBoundaryIterator(path),
+                              onUpdate: (idx, updates) => updateBoundaryIterator(path, idx, updates),
+                              onRemove: (idx) => removeBoundaryIterator(path, idx),
+                            })}
+                          </div>
+                        )}
                       </div>
                     )
                   })}
@@ -591,6 +701,130 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
           Run Extraction
         </button>
       </div>
+    </div>
+  )
+}
+
+
+// ─── Subcomponents ──────────────────────────────────────────────────────
+
+interface IteratorRowProps {
+  iterator: Iterator
+  usedNames: Set<IteratorName>
+  leafPaths: string[]
+  jobId: string
+  onUpdate: (updates: Partial<Iterator>) => void
+  onRemove: () => void
+}
+
+const ITERATOR_NAMES: IteratorName[] = ['i', 'j', 'k']
+
+function IteratorRow({ iterator, usedNames, leafPaths, jobId, onUpdate, onRemove }: IteratorRowProps) {
+  const [matchCount, setMatchCount] = useState<number | null>(null)
+  const [matchError, setMatchError] = useState<string | null>(null)
+
+  // Live count: hit validate-selector when count_selector changes (debounced).
+  useEffect(() => {
+    if (!iterator.count_selector || !jobId) {
+      setMatchCount(null)
+      setMatchError(null)
+      return
+    }
+    const handle = setTimeout(async () => {
+      try {
+        const res = await extractionApi.validateSelector(jobId, iterator.count_selector, 1)
+        if (res.error) {
+          setMatchError(res.error)
+          setMatchCount(null)
+        } else {
+          setMatchCount(res.match_count ?? 0)
+          setMatchError(null)
+        }
+      } catch {
+        setMatchError('validation failed')
+        setMatchCount(null)
+      }
+    }, 350)
+    return () => clearTimeout(handle)
+  }, [iterator.count_selector, jobId])
+
+  const anchorList = (() => {
+    const a = iterator.anchor
+    if (!a) return []
+    if (typeof a === 'string') return [a]
+    return a
+  })()
+
+  const toggleAnchor = (path: string) => {
+    const next = anchorList.includes(path)
+      ? anchorList.filter((p) => p !== path)
+      : [...anchorList, path]
+    if (next.length === 0) onUpdate({ anchor: null })
+    else if (next.length === 1) onUpdate({ anchor: next[0] })
+    else onUpdate({ anchor: next })
+  }
+
+  return (
+    <div className="bg-base-300/30 rounded-lg p-2 space-y-1.5">
+      <div className="flex gap-1.5 items-center">
+        <select
+          className="select select-bordered select-xs w-14 font-mono"
+          value={iterator.name}
+          onChange={(e) => onUpdate({ name: e.target.value as IteratorName })}
+        >
+          {ITERATOR_NAMES.map((n) => (
+            <option key={n} value={n} disabled={n !== iterator.name && usedNames.has(n)}>
+              {n}
+            </option>
+          ))}
+        </select>
+        <input
+          type="text"
+          className="input input-bordered input-xs flex-1 font-mono text-xs"
+          placeholder="count selector — e.g. tr:first-of-type > td"
+          value={iterator.count_selector}
+          onChange={(e) => onUpdate({ count_selector: e.target.value })}
+        />
+        {matchCount !== null && (
+          <span className={`badge badge-soft badge-xs ${matchCount > 0 ? 'badge-success' : 'badge-warning'}`}>
+            {matchCount} match{matchCount !== 1 ? 'es' : ''}
+          </span>
+        )}
+        {matchError && (
+          <span className="badge badge-soft badge-xs badge-error" title={matchError}>
+            error
+          </span>
+        )}
+        <button
+          type="button"
+          className="btn btn-ghost btn-xs btn-square text-error"
+          onClick={onRemove}
+          title="Remove iterator"
+        >
+          <span className="icon-[tabler--x] size-3" />
+        </button>
+      </div>
+      {leafPaths.length > 0 && (
+        <details className="text-[10px]" open={anchorList.length > 0}>
+          <summary className="cursor-pointer text-base-content/40 select-none">
+            Anchor fields {anchorList.length > 0 && <span className="text-base-content/60">({anchorList.length})</span>}
+            <span className="text-base-content/30 ml-1 font-normal">— skip iteration when ALL listed fields are empty</span>
+          </summary>
+          <div className="flex flex-wrap gap-1 mt-1">
+            {leafPaths.map((p) => (
+              <label key={p} className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="checkbox checkbox-xs"
+                  checked={anchorList.includes(p)}
+                  onChange={() => toggleAnchor(p)}
+                />
+                <span className="font-mono">{p}</span>
+              </label>
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   )
 }

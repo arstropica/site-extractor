@@ -187,10 +187,22 @@ export interface FieldMapping {
   url_regex?: string | null
 }
 
+export type IteratorName = 'i' | 'j' | 'k'
+
+export interface Iterator {
+  name: IteratorName
+  count_selector: string
+  // Single string is sugar for a one-element list. Default (null/undefined)
+  // = use the first declared field as anchor. OR-of-presence: skip when ALL
+  // listed anchors are empty.
+  anchor?: string | string[] | null
+}
+
 export interface BoundaryMapping {
   field_path: string
   boundary?: string | null
   iterator?: string | null
+  iterators?: Iterator[]
 }
 
 export interface DocumentExtractionConfig {
@@ -198,6 +210,7 @@ export interface DocumentExtractionConfig {
   url_pattern?: string | null
   boundaries: BoundaryMapping[]
   field_mappings: FieldMapping[]
+  iterators?: Iterator[]
   merge_by?: string | null
   merge_strategy?: string
 }
@@ -219,6 +232,7 @@ export interface ValidateSelectorResponse {
   match_count: number
   pages_checked: number
   sample_matches: Array<{ page_url: string; text: string; tag: string; classes: string[] }>
+  error?: string
 }
 
 export interface Job {
