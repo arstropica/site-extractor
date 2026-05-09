@@ -727,7 +727,7 @@ class ExtractionEngine:
             # Default to src for images
             raw = el.get("src", "") or el.get("data-src", "")
         else:
-            raw = el.get_text(strip=True)
+            raw = re.sub(r"\s+", " ", el.get_text(separator=" ", strip=True))
 
         if not raw:
             return None
