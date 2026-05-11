@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import uuid
 from datetime import datetime
@@ -111,6 +112,38 @@ class Crawler:
         self._robot_parsers: Dict[str, Optional[RobotFileParser]] = {}
         self._domain_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._global_semaphore: Optional[asyncio.Semaphore] = None
+        # Per-domain pacing: enforces a jittered `request_delay_ms` between
+        # consecutive outbound requests on the same netloc — applied to
+        # documents (page HEAD/GET) AND files (asset HEAD/GET, robots.txt).
+        # A constant cadence is itself a bot fingerprint, so each gap is
+        # randomized; CDN front-ends (Akamai-fronted archive.org, etc.)
+        # commonly score inter-request regularity when deciding to throttle
+        # or block.
+        self._domain_pace_locks: Dict[str, asyncio.Lock] = {}
+        self._domain_last_request: Dict[str, float] = {}
+
+    async def _pace_domain(self, url: str) -> None:
+        """Block until a jittered window has elapsed since the previous paced
+        event on this domain, then stamp the new time. The window is uniform
+        in [0.5 * delay_ms, 1.5 * delay_ms) so the configured setpoint stays
+        the long-run average. No-op when the configured delay is zero.
+        """
+        if self._delay_ms <= 0:
+            return
+        domain = urlparse(url).netloc
+        async with self._state_lock:
+            lock = self._domain_pace_locks.get(domain)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._domain_pace_locks[domain] = lock
+        loop = asyncio.get_event_loop()
+        async with lock:
+            last = self._domain_last_request.get(domain, 0.0)
+            jittered = (self._delay_ms / 1000.0) * (0.5 + random.random())
+            wait = jittered - (loop.time() - last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._domain_last_request[domain] = loop.time()
 
     @staticmethod
     def _extract_freshness_meta(headers: Dict[str, Any], size: int = 0) -> dict:
@@ -476,7 +509,6 @@ class Crawler:
                         client, url, self._job_id, self._storage, state, url_category, resource_filter,
                         referer=parent_url,
                     )
-            await asyncio.sleep(self._delay_ms / 1000.0)
             return
 
         # Page branch: fetch HTML, save, extract links, dispatch asset downloads
@@ -495,6 +527,7 @@ class Crawler:
                     served_from_cache = False
                     if sidecar:
                         try:
+                            await self._pace_domain(url)
                             head = await client.head(
                                 url, timeout=10.0, follow_redirects=True,
                             )
@@ -666,8 +699,6 @@ class Crawler:
                         "url": url, "error": str(e),
                     })
 
-        await asyncio.sleep(self._delay_ms / 1000.0)
-
     async def _fetch_with_retry(self, fetcher, url: str, retry_limit: int):
         """Run `fetcher()` with retry on transient failures (timeout, 5xx, network errors).
         Returns (html, content_type, size, headers) on success.
@@ -710,6 +741,7 @@ class Crawler:
     async def _fetch_http(self, client: httpx.AsyncClient, url: str, retry_limit: int = 0):
         """Fetch a page via HTTP. Returns (html, content_type, size, headers)."""
         async def do_fetch():
+            await self._pace_domain(url)
             resp = await client.get(url)
             resp.raise_for_status()  # so retry_with logic catches 5xx
             content_type = resp.headers.get("content-type", "")
@@ -726,6 +758,7 @@ class Crawler:
         that never reach networkidle), then waits briefly for additional content.
         """
         async def do_fetch():
+            await self._pace_domain(url)
             page = await context.new_page()
             try:
                 # Outer asyncio.wait_for is a belt-and-suspenders watchdog in
@@ -854,6 +887,7 @@ class Crawler:
         try:
             # ── HEAD probe ────────────────────────────────────────────────
             try:
+                await self._pace_domain(url)
                 head = await client.head(
                     url, timeout=10.0, follow_redirects=True, headers=req_headers,
                 )
@@ -952,6 +986,7 @@ class Crawler:
                 skip_size_check = True
 
             # ── Streaming GET with size guard ─────────────────────────────
+            await self._pace_domain(url)
             async with client.stream(
                 "GET", url, follow_redirects=True, headers=req_headers,
             ) as resp:
@@ -1139,6 +1174,7 @@ class Crawler:
 
         if robots_url not in self._robot_parsers:
             try:
+                await self._pace_domain(robots_url)
                 resp = await client.get(robots_url, timeout=10.0)
                 if resp.status_code == 200:
                     rp = RobotFileParser()
