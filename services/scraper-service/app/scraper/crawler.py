@@ -102,6 +102,12 @@ class CrawlState:
 class Crawler:
     """Main crawl engine supporting HTTP and browser modes."""
 
+    # ε for anti-fingerprint jitter, applied as a small uniform pre-sleep on
+    # every outbound resource request (pages, assets, robots). Breaks the
+    # synchronized-burst pattern that gives away concurrent scrapers on
+    # CDN front-ends that score timing regularity.
+    JITTER_MS = 100
+
     def __init__(self, redis_client, gateway_client=None, db_conn=None):
         self.redis = redis_client
         # GatewayClient — page/resource/job-state writes go through here as
@@ -112,23 +118,21 @@ class Crawler:
         self._robot_parsers: Dict[str, Optional[RobotFileParser]] = {}
         self._domain_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._global_semaphore: Optional[asyncio.Semaphore] = None
-        # Per-domain pacing: enforces a jittered `request_delay_ms` between
-        # consecutive outbound requests on the same netloc — applied to
-        # documents (page HEAD/GET) AND files (asset HEAD/GET, robots.txt).
-        # A constant cadence is itself a bot fingerprint, so each gap is
-        # randomized; CDN front-ends (Akamai-fronted archive.org, etc.)
-        # commonly score inter-request regularity when deciding to throttle
-        # or block.
+        # Per-domain page-discovery pacing: enforces `request_delay_ms`
+        # between consecutive page transitions on the same netloc. The
+        # delay is NOT applied to asset/resource fetches — those only get
+        # the smaller `_jitter` pre-sleep.
         self._domain_pace_locks: Dict[str, asyncio.Lock] = {}
         self._domain_last_request: Dict[str, float] = {}
 
-    async def _pace_domain(self, url: str) -> None:
-        """Block until a jittered window has elapsed since the previous paced
-        event on this domain, then stamp the new time. The window is uniform
-        in [0.5 * delay_ms, 1.5 * delay_ms) so the configured setpoint stays
-        the long-run average. No-op when the configured delay is zero.
+    async def _pace_page(self, url: str) -> None:
+        """Block until at least `_delay_ms` has elapsed since the previous
+        page transition on this domain (plus a small jitter so the cadence
+        isn't a constant), then stamp the new time. No-op when the
+        configured delay is zero.
         """
         if self._delay_ms <= 0:
+            await self._jitter()
             return
         domain = urlparse(url).netloc
         async with self._state_lock:
@@ -139,11 +143,21 @@ class Crawler:
         loop = asyncio.get_event_loop()
         async with lock:
             last = self._domain_last_request.get(domain, 0.0)
-            jittered = (self._delay_ms / 1000.0) * (0.5 + random.random())
-            wait = jittered - (loop.time() - last)
+            target = (self._delay_ms + random.uniform(0, self.JITTER_MS)) / 1000.0
+            wait = target - (loop.time() - last)
             if wait > 0:
                 await asyncio.sleep(wait)
             self._domain_last_request[domain] = loop.time()
+
+    async def _jitter(self) -> None:
+        """Sleep a uniform random offset in [0, JITTER_MS) before an outbound
+        resource request. Pure anti-fingerprint — doesn't enforce any
+        inter-request spacing, so concurrent asset bursts still fan out, but
+        no two requests fire at the same instant.
+        """
+        if self.JITTER_MS <= 0:
+            return
+        await asyncio.sleep(random.uniform(0, self.JITTER_MS) / 1000.0)
 
     @staticmethod
     def _extract_freshness_meta(headers: Dict[str, Any], size: int = 0) -> dict:
@@ -514,6 +528,7 @@ class Crawler:
         # Page branch: fetch HTML, save, extract links, dispatch asset downloads
         async with self._global_semaphore:
             async with domain_sem:
+                await self._pace_page(url)
                 try:
                     # Disk + HEAD freshness: if we have this page on disk and the
                     # remote ETag/Last-Modified/Content-Length matches, reuse the
@@ -527,7 +542,6 @@ class Crawler:
                     served_from_cache = False
                     if sidecar:
                         try:
-                            await self._pace_domain(url)
                             head = await client.head(
                                 url, timeout=10.0, follow_redirects=True,
                             )
@@ -741,7 +755,6 @@ class Crawler:
     async def _fetch_http(self, client: httpx.AsyncClient, url: str, retry_limit: int = 0):
         """Fetch a page via HTTP. Returns (html, content_type, size, headers)."""
         async def do_fetch():
-            await self._pace_domain(url)
             resp = await client.get(url)
             resp.raise_for_status()  # so retry_with logic catches 5xx
             content_type = resp.headers.get("content-type", "")
@@ -758,7 +771,6 @@ class Crawler:
         that never reach networkidle), then waits briefly for additional content.
         """
         async def do_fetch():
-            await self._pace_domain(url)
             page = await context.new_page()
             try:
                 # Outer asyncio.wait_for is a belt-and-suspenders watchdog in
@@ -887,7 +899,7 @@ class Crawler:
         try:
             # ── HEAD probe ────────────────────────────────────────────────
             try:
-                await self._pace_domain(url)
+                await self._jitter()
                 head = await client.head(
                     url, timeout=10.0, follow_redirects=True, headers=req_headers,
                 )
@@ -986,7 +998,7 @@ class Crawler:
                 skip_size_check = True
 
             # ── Streaming GET with size guard ─────────────────────────────
-            await self._pace_domain(url)
+            await self._jitter()
             async with client.stream(
                 "GET", url, follow_redirects=True, headers=req_headers,
             ) as resp:
@@ -1174,7 +1186,7 @@ class Crawler:
 
         if robots_url not in self._robot_parsers:
             try:
-                await self._pace_domain(robots_url)
+                await self._jitter()
                 resp = await client.get(robots_url, timeout=10.0)
                 if resp.status_code == 200:
                     rp = RobotFileParser()
