@@ -156,6 +156,12 @@ class ScrapeConfig(BaseModel):
     auth: AuthConfig = Field(default_factory=AuthConfig)
     user_agent: Optional[str] = None
     retry_limit: Optional[int] = None  # per-job override; falls back to env SCRAPER_RETRY_LIMIT
+    # Browser-mode only. When True (default) the scraper aborts image / font /
+    # media requests inside Chromium and downloads them via httpx separately;
+    # this halves request volume on rate-limited CDNs (Wayback / Akamai).
+    # Set False for sites whose JS bot wall checks whether the page's own
+    # assets actually load — most JS-fingerprinting walls do.
+    block_resources: bool = True
 
 
 # ─── Extraction Schema Models ────────────────────────────────────────────────

@@ -36,8 +36,11 @@ WORKDIR /app
 COPY services/scraper-service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright Chromium browser (without --with-deps since we installed deps above)
-RUN playwright install chromium
+# Install patchright's patched Chromium browser. patchright ships a separate
+# CLI; the binary itself lives in the same Playwright cache dir, so any future
+# code that imports `playwright.async_api` would still find a browser — we use
+# patchright in crawler.py for the stealth patches it bundles.
+RUN patchright install chromium
 
 # Copy application code
 COPY services/scraper-service/app/ ./app/

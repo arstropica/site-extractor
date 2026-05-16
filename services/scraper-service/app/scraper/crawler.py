@@ -12,6 +12,8 @@ import logging
 import os
 import random
 import re
+import shutil
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -247,7 +249,13 @@ class Crawler:
         max_size = config.get("max_download_size") or settings.MAX_DOWNLOAD_SIZE
         depth_limit = config.get("depth_limit", 3)
         respect_robots = config.get("respect_robots", True)
-        user_agent = config.get("user_agent") or settings.DEFAULT_USER_AGENT
+        # In browser mode we prefer patchright's native (already-patched) UA over
+        # the env fallback — DEFAULT_USER_AGENT is pinned at a specific Chrome
+        # major version, and any drift from the actual browser TLS fingerprint
+        # is itself a bot signal. The httpx client still uses the explicit-or-
+        # fallback UA so its requests don't broadcast a header-less identity.
+        user_agent_override = config.get("user_agent")
+        user_agent = user_agent_override or settings.DEFAULT_USER_AGENT
         crawl_mode = config.get("crawl_mode", "http")
         # Retry limit: per-job override falls back to env default
         retry_limit = config.get("retry_limit")
@@ -260,6 +268,12 @@ class Crawler:
         # silently 404. See ScraperConfigStep.tsx "Duplicates" section for the
         # user-facing caveat.
         dedup_enabled = bool(config.get("dedup", {}).get("enabled", False))
+        # Browser-mode resource blocking. Default True for the historical reason
+        # documented at the route handler below (Wayback/Akamai throttling on
+        # duplicate burst fetches when the browser also pulls media). Set to
+        # False per-job when a target's bot wall does behavioral checks on
+        # whether the page's own assets load — most JS-fingerprinting walls do.
+        block_resources = bool(config.get("block_resources", True))
 
         # Seed the queue if fresh start
         if not state.queued_urls and not state.visited_urls:
@@ -293,32 +307,45 @@ class Crawler:
             cookies = auth_config.get("cookies", {})
             client_kwargs["cookies"] = cookies
 
-        browser = None
         browser_context = None
         pw = None
+        user_data_dir: Optional[str] = None
 
         try:
             if crawl_mode == "browser":
-                from playwright.async_api import async_playwright
+                # patchright is a stealth-patched Playwright fork; its strongest
+                # patches require launch_persistent_context (vanilla launch()
+                # leaves CDP/automation traces patchright would otherwise scrub).
+                # We give it a fresh tempdir per crawl so there's no cookie
+                # carry-over between jobs.
+                from patchright.async_api import async_playwright
                 pw = await async_playwright().start()
-                browser = await pw.chromium.launch(headless=True)
-                browser_context = await browser.new_context(
-                    user_agent=user_agent,
-                    ignore_https_errors=True,
-                )
+                user_data_dir = tempfile.mkdtemp(prefix=f"patchright-{job_id}-")
+                context_kwargs: Dict[str, Any] = {
+                    "user_data_dir": user_data_dir,
+                    "headless": True,
+                    "ignore_https_errors": True,
+                    "no_viewport": True,
+                }
+                if user_agent_override:
+                    context_kwargs["user_agent"] = user_agent_override
+                browser_context = await pw.chromium.launch_persistent_context(**context_kwargs)
 
-                # Block image / font / media fetches in the browser. We extract
-                # asset URLs from the rendered HTML and download them ourselves
-                # via httpx; letting Chromium also fetch them doubles every
-                # request and on rate-limited CDNs (Wayback / Akamai-fronted
-                # origins) the browser's burst trips per-IP throttling that
-                # then blocks our httpx asset downloads too.
-                async def _block_unneeded(route):
-                    if route.request.resource_type in ("image", "media", "font"):
-                        await route.abort()
-                    else:
-                        await route.continue_()
-                await browser_context.route("**/*", _block_unneeded)
+                if block_resources:
+                    # Skip image / font / media fetches in the browser. We
+                    # extract asset URLs from the rendered HTML and download
+                    # them ourselves via httpx; letting Chromium also fetch
+                    # them doubles every request and on rate-limited CDNs
+                    # (Wayback / Akamai-fronted origins) the browser's burst
+                    # trips per-IP throttling that then blocks our httpx asset
+                    # downloads too. Disabled per-job when a site does
+                    # behavioral checks on whether its assets actually load.
+                    async def _block_unneeded(route):
+                        if route.request.resource_type in ("image", "media", "font"):
+                            await route.abort()
+                        else:
+                            await route.continue_()
+                    await browser_context.route("**/*", _block_unneeded)
 
                 # Apply cookies for browser mode
                 if auth_method == "cookie" and auth_config.get("cookies"):
@@ -423,10 +450,12 @@ class Crawler:
             # force-exit the process with code 75 so Docker's restart policy
             # gives the next job a clean Playwright. Skipping cleanup is OK —
             # the container is going away anyway.
+            # Persistent context owns the underlying browser; closing it tears
+            # both down. The user_data_dir tempdir is removed after Playwright
+            # itself stops, so we don't yank files out from under the driver.
             cleanup_failed = False
             for label, awaitable, timeout in (
-                ("browser_context", browser_context.close() if browser_context else None, 5.0),
-                ("browser", browser.close() if browser else None, 10.0),
+                ("browser_context", browser_context.close() if browser_context else None, 10.0),
                 ("playwright", pw.stop() if pw else None, 5.0),
             ):
                 if awaitable is None:
@@ -442,6 +471,8 @@ class Crawler:
                     break
                 except Exception as e:
                     logger.warning(f"Job {job_id}: {label} cleanup raised {type(e).__name__}: {e}")
+            if user_data_dir:
+                shutil.rmtree(user_data_dir, ignore_errors=True)
             if cleanup_failed:
                 # Best-effort signal so the gateway sees the job as failed
                 # before we vanish — these awaits also get a short timeout.
@@ -795,9 +826,37 @@ class Crawler:
                     )
                 except Exception:
                     pass
+
+                # Cookie-wall pattern: some sites return an interstitial HTML
+                # whose JS sets a cookie via an external challenge script and
+                # then reloads to fetch the real content. networkidle waits
+                # until there have been no network connections for 500ms; if
+                # a reload happens it will re-trigger and the same call
+                # follows through. Best-effort — pages that genuinely never
+                # reach idle (ad-heavy CDNs) just hit the timeout and we
+                # return whatever DOM is current.
+                try:
+                    await asyncio.wait_for(
+                        page.wait_for_load_state("networkidle", timeout=20000),
+                        timeout=25.0,
+                    )
+                except Exception:
+                    pass
+
                 headers = dict(resp.headers)
                 content_type = resp.headers.get("content-type", "text/html")
                 html = await page.content()
+
+                if logger.isEnabledFor(logging.DEBUG):
+                    try:
+                        ck = await context.cookies()
+                        logger.debug(
+                            "browser fetch %s → %d bytes, cookies=%s",
+                            url, len(html.encode()),
+                            [c.get("name") for c in ck],
+                        )
+                    except Exception:
+                        pass
 
                 # Sync session cookies that the site set during page load into
                 # the shared httpx client so subsequent asset downloads carry

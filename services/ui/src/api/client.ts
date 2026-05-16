@@ -161,6 +161,7 @@ export interface ScrapeConfig {
   auth: AuthConfig
   user_agent?: string
   retry_limit?: number
+  block_resources?: boolean
 }
 
 export interface SchemaField {
