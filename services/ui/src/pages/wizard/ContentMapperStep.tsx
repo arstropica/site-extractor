@@ -476,7 +476,7 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* Page preview with picker */}
-            <div className="space-y-3">
+            <div className="space-y-3 lg:flex lg:flex-col lg:space-y-3">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold uppercase tracking-wider text-base-content/60">
                   Page Preview
@@ -506,17 +506,17 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
                 ))}
               </select>
               {selectedPageId ? (
-                <div className="border border-base-content/10 rounded-xl overflow-hidden">
+                <div className="border border-base-content/10 rounded-xl overflow-hidden lg:flex-1 lg:min-h-0">
                   <iframe
                     ref={iframeRef}
                     src={pagesApi.viewUrl(jobId, selectedPageId)}
-                    className="w-full h-[28rem] bg-white"
+                    className="w-full h-[28rem] lg:h-full bg-white"
                     sandbox="allow-same-origin allow-scripts"
                     title="Page preview"
                   />
                 </div>
               ) : (
-                <div className="flex flex-col items-center justify-center py-16 gap-3 text-base-content/30 border border-dashed border-base-content/10 rounded-xl">
+                <div className="flex flex-col items-center justify-center py-16 gap-3 text-base-content/30 border border-dashed border-base-content/10 rounded-xl lg:flex-1 lg:min-h-0">
                   <span className="icon-[tabler--browser] size-10" />
                   <p className="text-sm">Select a page to preview</p>
                 </div>
