@@ -31,6 +31,27 @@ from .page_storage import PageStorage
 logger = logging.getLogger(__name__)
 
 
+# url(...) refs inside CSS — handles bare, single-quoted, and double-quoted
+# forms. Used in three places: inline style="..." attributes, inline <style>
+# blocks, and the bodies of downloaded stylesheets. Captures the inner URL
+# string verbatim so the post-processor can swap it for a local path.
+_CSS_URL_RE = re.compile(r'url\(\s*(?:"([^"]+)"|\'([^\']+)\'|([^)\s"\']+))\s*\)')
+
+
+def _css_urls(text: str) -> list:
+    """Return the inner URLs from every url(...) ref in a CSS-ish blob.
+
+    Skips data: URIs and bare fragment refs; both are valid CSS but don't
+    represent fetchable assets.
+    """
+    out = []
+    for m in _CSS_URL_RE.finditer(text):
+        u = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+        if u and not u.startswith(("data:", "#")):
+            out.append(u)
+    return out
+
+
 class CrawlState:
     """Tracks the state of a crawl for pause/resume support."""
 
@@ -688,7 +709,7 @@ class Crawler:
                     # re-categorizes from the HEAD/GET MIME, which is the only
                     # reliable signal for image-CDN / proxy URLs that hide the
                     # extension in the query string or omit it entirely.
-                    asset_urls = self._extract_assets(html, url)
+                    asset_urls, stylesheet_urls = self._extract_assets(html, url)
                     asset_tasks = []
                     asset_sem = asyncio.Semaphore(self._max_total)
                     seen_for_page: set[str] = set()
@@ -715,6 +736,15 @@ class Crawler:
                         asset_tasks.append(asyncio.create_task(_bounded()))
                     if asset_tasks:
                         await asyncio.gather(*asset_tasks, return_exceptions=True)
+
+                    # Second pass: walk downloaded stylesheets for url() refs
+                    # that the HTML-level scan can't see (background-image
+                    # declarations, @font-face src, etc.). These get queued for
+                    # download and the CSS files rewritten to local paths so
+                    # the preview iframe doesn't 404 on backgrounds.
+                    await self._postprocess_stylesheets(
+                        client, stylesheet_urls, state, resource_filter, asset_sem, referer=url,
+                    )
 
                     # Progress event (read-only snapshot of counters).
                     # pages_total = pages_discovered (queued URLs we plan to
@@ -891,6 +921,82 @@ class Crawler:
                 except Exception as e:
                     logger.warning(f"page.close() failed for {url}: {e}")
         return await self._fetch_with_retry(do_fetch, url, retry_limit)
+
+    async def _postprocess_stylesheets(
+        self, client, stylesheet_urls, state, resource_filter, asset_sem, referer,
+    ):
+        """Second-pass discovery for assets referenced from inside CSS bodies.
+
+        Walks each successfully-downloaded stylesheet on disk, collects url()
+        refs (resolved relative to the stylesheet's own URL, not the page's),
+        downloads them, then rewrites the stylesheet to reference the local
+        filenames so the preview iframe loads backgrounds correctly.
+
+        Single-level only — @import chains that introduce more stylesheets
+        aren't followed recursively. Promote to a worklist if a real site
+        needs it.
+        """
+        if not stylesheet_urls:
+            return
+
+        # (css_url, local_path, original_text, [(absolute_ref_url, original_string), ...])
+        css_files = []
+        discovered: set = set()
+        for css_url in stylesheet_urls:
+            local = self._storage.asset_local_path(css_url)
+            if not local.exists():
+                continue
+            try:
+                text = local.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            refs = []
+            for original in _css_urls(text):
+                abs_url = urljoin(css_url, original)
+                if not abs_url.startswith(("http://", "https://")):
+                    continue
+                refs.append((abs_url, original))
+                discovered.add(abs_url)
+            css_files.append((css_url, local, text, refs))
+
+        tasks = []
+        for url in discovered:
+            if not resource_filter.should_consider(url):
+                continue
+            cat = resource_filter.get_category(url)
+            async def _go(u=url, c=cat):
+                async with asset_sem:
+                    await self._download_asset(
+                        client, u, self._job_id, self._storage, state, c, resource_filter,
+                        referer=referer,
+                    )
+            tasks.append(asyncio.create_task(_go()))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Rewrite each CSS to point at the project-canonical ../assets/<file>
+        # form — the same shape page_storage writes into HTML for img/link/
+        # style refs. Using one form everywhere lets the extractor treat
+        # style-sourced URLs identically to <img src> values (single disk-
+        # check via _verify_asset_ref, verbatim emit). Browser path
+        # normalization handles `../` from a stylesheet at assets/<file>.css:
+        # `<base>/assets/../assets/<other>` collapses to `<base>/assets/<other>`.
+        for css_url, local, text, refs in css_files:
+            if not refs:
+                continue
+            ref_map = {orig: self._storage.asset_filename(abs_url) for abs_url, orig in refs}
+            def _sub(m, ref_map=ref_map):
+                orig = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+                local_name = ref_map.get(orig)
+                if local_name is None:
+                    return m.group(0)
+                return f"url(../assets/{local_name})"
+            rewritten = _CSS_URL_RE.sub(_sub, text)
+            if rewritten != text:
+                try:
+                    local.write_text(rewritten, encoding="utf-8")
+                except Exception as e:
+                    logger.warning(f"Failed to rewrite CSS {css_url}: {e}")
 
     async def _download_asset(self, client, url, job_id, storage, state, category, resource_filter, referer=None):
         """Public asset-download entry: handles retry-with-backoff for transient
@@ -1186,14 +1292,25 @@ class Crawler:
                 links.append(abs_url)
         return list(set(links))
 
-    def _extract_assets(self, html: str, base_url: str) -> list:
-        """Extract asset URLs (images, CSS, etc.) from HTML.
+    def _extract_assets(self, html: str, base_url: str) -> tuple:
+        """Extract asset URLs (images, CSS, backgrounds, etc.) from HTML.
+
+        Returns (assets, stylesheets). `stylesheets` is the subset of `assets`
+        from <link rel=stylesheet>; the caller post-processes those for the
+        url() refs that live inside the CSS bodies (background images, fonts,
+        @import chains — invisible to an HTML-only scan).
+
+        Three url() discovery surfaces beyond the structural tags:
+          - inline style="..." attributes
+          - inline <style>...</style> blocks
+          - external stylesheet bodies (handled in _postprocess_stylesheets)
 
         Prefers `data-original-*` attributes when present, since cached pages
         read back from disk have their src/href rewritten to local paths.
         """
         soup = BeautifulSoup(html, "lxml")
         assets = set()
+        stylesheets = set()
 
         for img in soup.find_all("img"):
             src = img.get("data-original-src") or img.get("src")
@@ -1204,11 +1321,33 @@ class Crawler:
             if rel and "stylesheet" in rel:
                 href = link.get("data-original-href") or link.get("href")
                 if href:
-                    assets.add(urljoin(base_url, href))
+                    u = urljoin(base_url, href)
+                    assets.add(u)
+                    stylesheets.add(u)
         for source in soup.find_all("source", src=True):
             assets.add(urljoin(base_url, source["src"]))
 
-        return [a for a in assets if a.startswith(("http://", "https://"))]
+        # Inline style="background:url(...)" — page_storage rewrites these to
+        # ../assets/<filename>, so they need to be in the download queue or the
+        # rewrite points at files that were never fetched.
+        for tag in soup.find_all(style=True):
+            for u in _css_urls(tag["style"]):
+                assets.add(urljoin(base_url, u))
+        # Inline <style> blocks: same logic, but page_storage doesn't rewrite
+        # these (the CSS text lives in the DOM, not a separate file). The
+        # browser resolves url() refs against the page's URL when the styles
+        # come from inline blocks, so leaving them un-rewritten means the
+        # preview iframe will request the absolute URL — fine when the asset
+        # is served live, but broken for archived/cached previews. Acceptable
+        # tradeoff for now; promote to a rewriter pass if it bites.
+        for tag in soup.find_all("style"):
+            text = tag.string or tag.get_text() or ""
+            if text:
+                for u in _css_urls(text):
+                    assets.add(urljoin(base_url, u))
+
+        http = lambda s: [a for a in s if a.startswith(("http://", "https://"))]
+        return http(assets), http(stylesheets)
 
     def _is_allowed_domain(self, url: str, allowed_domains: set) -> bool:
         """Check if a URL's domain is in the allowlist (supports wildcards)."""

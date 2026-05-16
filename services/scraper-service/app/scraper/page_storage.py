@@ -109,10 +109,32 @@ class PageStorage:
             style = tag["style"]
             urls = re.findall(r'url\(["\']?(.*?)["\']?\)', style)
             for u in urls:
+                if not u or u.startswith(("data:", "#")):
+                    continue
                 abs_url = urljoin(effective_base, u)
                 local_asset = self.asset_filename(abs_url)
                 style = style.replace(u, f"../assets/{quote(local_asset)}")
             tag["style"] = style
+
+        # Rewrite url() refs inside <style>...</style> blocks. Same transform
+        # as the style="..." attribute pass — if we don't do this, the engine
+        # sees the original (relative or absolute) URLs at extraction time and
+        # the resolver drops them (no way to verify against on-disk assets
+        # without re-running the scraper's URL→filename hash). Doing it here
+        # keeps the engine's resolution logic uniform: every url() ref it
+        # encounters is in `../assets/<file>` form.
+        for style_tag in soup.find_all("style"):
+            text = style_tag.string or style_tag.get_text() or ""
+            if not text:
+                continue
+            urls = re.findall(r'url\(["\']?(.*?)["\']?\)', text)
+            for u in urls:
+                if not u or u.startswith(("data:", "#")):
+                    continue
+                abs_url = urljoin(effective_base, u)
+                local_asset = self.asset_filename(abs_url)
+                text = text.replace(u, f"../assets/{quote(local_asset)}")
+            style_tag.string = text
 
         # Remove scripts (not needed for extraction)
         for script in soup.find_all("script"):
