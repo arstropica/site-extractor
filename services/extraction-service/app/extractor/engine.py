@@ -72,6 +72,129 @@ def _resolve_selector(s: str, subs: Optional[Dict[str, int]] = None) -> str:
     return _normalize_selector(s)
 
 
+# CSS rule shape: `selectors { declarations }`. Comments are stripped before
+# matching, so `_RULE_RE` only sees rule bodies. `_DECL_RE` parses individual
+# `property: value` pairs from a declaration block or an inline style attr.
+_CSS_RULE_RE = re.compile(r"([^{}]+)\{([^{}]*)\}")
+_CSS_DECL_RE = re.compile(r"([\w-]+)\s*:\s*([^;]+?)\s*(?:;|$)")
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+# Inner-URL extractor for url() refs inside a property value. Lets
+# _extract_style unwrap background-image, list-style-image, mask-image,
+# cursor, etc. and emit the bare URLs instead of `url("...")` literals.
+_URL_INNER_RE = re.compile(r"url\(\s*(?:\"([^\"]+)\"|'([^']+)'|([^)\s\"']+))\s*\)")
+
+
+def _urls_in_value(value: str) -> List[str]:
+    """Pull every url() inner string out of a CSS property value.
+
+    Skips data: and #fragment refs — they aren't fetchable assets.
+    """
+    out: List[str] = []
+    for m in _URL_INNER_RE.finditer(value or ""):
+        u = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+        if u and not u.startswith(("data:", "#")):
+            out.append(u)
+    return out
+
+
+def _parse_declarations(blob: str) -> Dict[str, str]:
+    """Parse a CSS declaration block / inline style attr into {prop: value}."""
+    out: Dict[str, str] = {}
+    for m in _CSS_DECL_RE.finditer(blob or ""):
+        prop = m.group(1).strip().lower()
+        val = m.group(2).strip()
+        if prop and val:
+            out[prop] = val
+    return out
+
+
+class _StyleResolver:
+    """Per-page CSS lookup for the `style_property` field source.
+
+    Builds a list of (selector_text, declarations) entries in document order
+    by walking the page's inline <style> blocks and each external stylesheet
+    saved to disk (via the rewritten ../assets/ href). Lookup is exact match
+    on selector text — the user opted in to "first-match in the cascaded
+    ruleset" rather than a full specificity-aware cascade, so we don't try to
+    resolve which rules actually apply to the element.
+    """
+
+    def __init__(self, soup, page_html_path: Path, data_dir: Path, job_id: str):
+        self._rules: List = []  # [(selector_text, {prop: value})]
+
+        # Inline <style> blocks first — they sit in <head> before/after the
+        # external link, but for first-match semantics the absolute order
+        # doesn't matter much. Author intent is usually "inline overrides
+        # external," which document order tends to follow anyway.
+        for style_tag in soup.find_all("style"):
+            self._ingest(style_tag.string or style_tag.get_text() or "")
+
+        # External stylesheets. The scraper rewrites <link rel=stylesheet>
+        # hrefs to ../assets/<filename>. Resolve those relative to the saved
+        # HTML's parent dir, then clamp to the job root so a hostile relative
+        # path can't escape into other jobs' data.
+        job_root = (data_dir / "jobs" / job_id).resolve()
+        page_dir = page_html_path.parent.resolve()
+        for link in soup.find_all("link"):
+            rel = link.get("rel")
+            if not rel or "stylesheet" not in rel:
+                continue
+            href = link.get("href")
+            if not href:
+                continue
+            try:
+                css_path = (page_dir / href).resolve()
+                css_path.relative_to(job_root)
+            except (ValueError, OSError):
+                continue
+            if not css_path.is_file():
+                continue
+            try:
+                text = css_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            self._ingest(text)
+
+    def _ingest(self, css_text: str) -> None:
+        text = _CSS_COMMENT_RE.sub("", css_text)
+        for m in _CSS_RULE_RE.finditer(text):
+            sel_blob = m.group(1).strip()
+            decls = _parse_declarations(m.group(2))
+            if not decls:
+                continue
+            # A rule like `.a, .b { color: red }` registers under each
+            # selector independently so exact-match lookup works either way.
+            for sel in sel_blob.split(","):
+                sel = sel.strip()
+                if sel:
+                    self._rules.append((sel, decls))
+
+    def resolve(self, element, field_selector: Optional[str], prop: str) -> Optional[str]:
+        """Return the CSS value for `prop` on `element`, or None.
+
+        Lookup order:
+          1. Element's own style="..." attribute (true inline).
+          2. Rules in document order whose selector text equals
+             `field_selector` (exact string match, after .strip()).
+        First match wins.
+        """
+        p = prop.strip().lower()
+        if not p:
+            return None
+        if element is not None:
+            inline = element.get("style") if hasattr(element, "get") else None
+            if inline:
+                decls = _parse_declarations(inline)
+                if p in decls:
+                    return decls[p]
+        if field_selector:
+            target = field_selector.strip()
+            for sel, decls in self._rules:
+                if sel == target and p in decls:
+                    return decls[p]
+        return None
+
+
 class ExtractionEngine:
     def __init__(self, data_dir: str):
         self.data_dir = Path(data_dir)
@@ -123,6 +246,10 @@ class ExtractionEngine:
             soup = BeautifulSoup(html, "lxml")
             body = soup.body or soup
 
+            # Per-page CSS resolver. Built once per page so multiple
+            # style_property fields don't re-parse the stylesheets.
+            style_resolver = _StyleResolver(soup, html_path, self.data_dir, job_id)
+
             # Find root scope elements
             if root_boundary:
                 scope_elements = body.select(_normalize_selector(root_boundary))
@@ -133,7 +260,7 @@ class ExtractionEngine:
                 for record in self._iter_records(
                     scope_el, root_iterators, schema_tree, mapping_lookup,
                     boundaries, parent_path="", page_url=page.get("url", ""),
-                    job_id=job_id, base_subs={},
+                    job_id=job_id, base_subs={}, style_resolver=style_resolver,
                 ):
                     results.append({
                         "page_url": page.get("url"),
@@ -329,6 +456,7 @@ class ExtractionEngine:
         page_url: str,
         job_id: str,
         base_subs: Dict[str, int],
+        style_resolver: Optional["_StyleResolver"] = None,
     ) -> List[Dict[str, Any]]:
         """Expand iterators into per-iteration records (Cartesian product).
 
@@ -341,7 +469,7 @@ class ExtractionEngine:
         if not iterators:
             return [self._extract_record(
                 scope_el, schema_tree, mapping_lookup, boundaries,
-                parent_path, page_url, job_id, base_subs,
+                parent_path, page_url, job_id, base_subs, style_resolver,
             )]
 
         # Evaluate count for each iterator (relative to scope_el; parent
@@ -370,7 +498,7 @@ class ExtractionEngine:
 
             records.append(self._extract_record(
                 scope_el, schema_tree, mapping_lookup, boundaries,
-                parent_path, page_url, job_id, subs,
+                parent_path, page_url, job_id, subs, style_resolver,
             ))
         return records
 
@@ -449,6 +577,7 @@ class ExtractionEngine:
         page_url: str,
         job_id: str,
         index_subs: Optional[Dict[str, int]] = None,
+        style_resolver: Optional["_StyleResolver"] = None,
     ) -> Dict[str, Any]:
         """Extract a single record from a DOM scope element."""
         record: Dict[str, Any] = {}
@@ -473,7 +602,7 @@ class ExtractionEngine:
                     record[field_name] = self._extract_collection(
                         scope_el, boundary_selector, iterator_selector,
                         nested_iterators, children, mapping_lookup, boundaries,
-                        field_path, page_url, job_id, subs,
+                        field_path, page_url, job_id, subs, style_resolver,
                     )
                 else:
                     # Nested record: narrow scope
@@ -487,7 +616,7 @@ class ExtractionEngine:
 
                     record[field_name] = self._extract_record(
                         nested_el, children, mapping_lookup, boundaries,
-                        field_path, page_url, job_id, subs,
+                        field_path, page_url, job_id, subs, style_resolver,
                     )
             else:
                 # Leaf field
@@ -499,8 +628,12 @@ class ExtractionEngine:
                 selector = mapping.get("selector")
                 attribute = mapping.get("attribute")
                 url_regex = mapping.get("url_regex")
+                style_property = mapping.get("style_property")
 
-                # url_regex source takes priority over selector
+                # Source priority: url_regex > style_property > attribute > text.
+                # UI enforces mutual exclusion (each input disables the others
+                # when it has content); this ordering only matters for stale
+                # data or manual edits that leave more than one populated.
                 if url_regex:
                     value = self._extract_from_url(page_url, url_regex, field_type)
                     if is_array:
@@ -511,6 +644,11 @@ class ExtractionEngine:
                         record[field_name] = [value] if value is not None else []
                     else:
                         record[field_name] = value
+                elif style_property:
+                    record[field_name] = self._extract_style(
+                        scope_el, selector, style_property, style_resolver,
+                        page_url, job_id, is_array, subs,
+                    )
                 elif is_array:
                     record[field_name] = self._extract_leaf_array(
                         scope_el, selector, attribute, field_type,
@@ -537,6 +675,7 @@ class ExtractionEngine:
         page_url: str,
         job_id: str,
         index_subs: Dict[str, int],
+        style_resolver: Optional["_StyleResolver"] = None,
     ) -> List[Dict[str, Any]]:
         """Extract a collection (array of records) from the DOM.
 
@@ -557,7 +696,7 @@ class ExtractionEngine:
         if nested_iterators:
             return self._iter_records(
                 container, nested_iterators, children, mapping_lookup,
-                boundaries, field_path, page_url, job_id, index_subs,
+                boundaries, field_path, page_url, job_id, index_subs, style_resolver,
             )
 
         # Existing: repeating-element selector
@@ -571,11 +710,111 @@ class ExtractionEngine:
         for el in elements:
             item = self._extract_record(
                 el, children, mapping_lookup, boundaries,
-                field_path, page_url, job_id, index_subs,
+                field_path, page_url, job_id, index_subs, style_resolver,
             )
             items.append(item)
 
         return items
+
+    def _extract_style(
+        self,
+        scope_el: Tag,
+        selector: Optional[str],
+        property_name: str,
+        style_resolver: Optional["_StyleResolver"],
+        page_url: str,
+        job_id: str,
+        is_array: bool,
+        index_subs: Optional[Dict[str, int]] = None,
+    ) -> Any:
+        """Resolve a CSS property value for the element matched by `selector`.
+
+        Lookup is first-match across (element style attr → page <style>
+        blocks → external stylesheets), keyed on exact selector-text equality.
+
+        url-bearing values (background-image, list-style-image, mask-image,
+        cursor, etc.) are unwrapped into the individual URL strings, each
+        verified through `_verify_asset_ref` exactly like `<img src>` goes
+        through it, and emitted verbatim — same `../assets/<file>` form
+        page_storage and the crawler's CSS postprocess both write. Scalar
+        fields return the first verified URL; array fields return all of
+        them. URLs the scraper didn't rewrite to `../assets/` (external,
+        protocol-relative, unrewritten relative) aren't ours to vouch for
+        and drop under the strict no-leakage policy.
+
+        Non-url values (`#ff0000`, `12px`, `10px 20px`) pass through.
+        """
+        empty = [] if is_array else None
+        if not style_resolver or not property_name:
+            return empty
+        subs = index_subs or {}
+        if selector:
+            parts = [s.strip() for s in selector.split("|")]
+            el = None
+            picked = selector
+            for part in parts:
+                try:
+                    el = scope_el.select_one(_resolve_selector(part, subs))
+                except Exception:
+                    continue
+                if el:
+                    picked = part
+                    break
+            if not el:
+                return empty
+        else:
+            el = scope_el
+            picked = None
+        # Use the iterator-substituted form of the picked selector when
+        # looking up stylesheet rules. CSS rules are written in concrete
+        # form, not with {i} placeholders.
+        lookup_sel = _resolve_selector(picked, subs) if picked else None
+        raw = style_resolver.resolve(el, lookup_sel, property_name)
+        if raw is None:
+            return empty
+
+        urls = _urls_in_value(raw)
+        if not urls:
+            # Non-url value (color, padding, etc.) — pass through.
+            return [raw] if is_array else raw
+
+        verified = []
+        for u in urls:
+            result = self._verify_asset_ref(u, job_id, page_url)
+            if result is None or result is _MISSING_ASSET:
+                continue
+            verified.append(u)
+        if is_array:
+            return verified
+        return verified[0] if verified else None
+
+    def _verify_asset_ref(self, ref: str, job_id: str, page_url: str = "") -> Any:
+        """Verify a scraper-rewritten `../assets/<file>` reference exists on disk.
+
+        Returns:
+          - the cleaned relative filename (suitable for joining with `assets/`
+            or other output prefixes) when the file is present;
+          - `_MISSING_ASSET` when the prefix matches but the file isn't there;
+          - `None` when the input isn't in `../assets/` form at all.
+
+        Centralizes the disk-check policy so leaf-text extraction and
+        style-property extraction share one implementation (and one log
+        message format). Callers map the three return shapes to whatever
+        output their field type needs.
+        """
+        if not ref or not ref.startswith("../assets/"):
+            return None
+        rel = ref[len("../assets/"):]
+        # On-disk filenames are URL-derived; query/fragment never reach disk.
+        rel_clean = rel.split("?", 1)[0].split("#", 1)[0]
+        asset_path = self.data_dir / "jobs" / job_id / "assets" / rel_clean
+        if not asset_path.is_file():
+            logger.warning(
+                "Skipping missing asset on %s: %s (expected at %s)",
+                page_url, ref, asset_path,
+            )
+            return _MISSING_ASSET
+        return rel_clean
 
     def _extract_leaf(
         self,
@@ -741,18 +980,8 @@ class ExtractionEngine:
         # extractor must verify the file exists on disk before emitting
         # the reference; otherwise consumers see dangling URLs that 404.
         raw_str = str(raw)
-        if raw_str.startswith("../assets/"):
-            rel = raw_str[len("../assets/"):]
-            # On-disk filenames are URL-derived; query/fragment are
-            # never part of the path and must be stripped before is_file.
-            rel_clean = rel.split("?", 1)[0].split("#", 1)[0]
-            asset_path = self.data_dir / "jobs" / job_id / "assets" / rel_clean
-            if not asset_path.is_file():
-                logger.warning(
-                    "Skipping missing asset on %s: %s (expected at %s)",
-                    page_url, raw_str, asset_path,
-                )
-                return _MISSING_ASSET
+        if self._verify_asset_ref(raw_str, job_id, page_url) is _MISSING_ASSET:
+            return _MISSING_ASSET
 
         if field_type == "number":
             # Extract numeric value from text

@@ -61,6 +61,16 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
   const [fieldMappings, setFieldMappings] = useState<FieldMapping[]>(savedDoc?.field_mappings ?? [])
   const [filePatterns, setFilePatterns] = useState<FilePattern[]>(savedConfig?.file_patterns ?? [])
   const [rootIterators, setRootIterators] = useState<Iterator[]>(savedDoc?.iterators ?? [])
+  // Per-row disclosure for the regex / style icon toggles. A field path is
+  // present when the user opened the slot via the icon; the input is also
+  // rendered when its value is non-empty (saved data auto-opens).
+  const [expandedRegex, setExpandedRegex] = useState<Set<string>>(new Set())
+  const [expandedStyle, setExpandedStyle] = useState<Set<string>>(new Set())
+  const toggleExpand = (set: Set<string>, setter: (s: Set<string>) => void, path: string) => {
+    const next = new Set(set)
+    if (next.has(path)) next.delete(path); else next.add(path)
+    setter(next)
+  }
 
   // Re-hydrate when activeJob changes (e.g., navigating from another job)
   const hydratedJobIdRef = useRef<string | null>(null)
@@ -607,6 +617,17 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
                 </h3>
                 {leafFields.map(({ path, field }) => {
                   const mapping = getMapping(path)
+                  const hasRegex = !!mapping?.url_regex
+                  const hasAttr = !!mapping?.attribute
+                  const hasStyle = !!mapping?.style_property
+                  const showRegex = expandedRegex.has(path) || hasRegex
+                  const showStyle = expandedStyle.has(path) || hasStyle
+                  // Mutual exclusion: each value source disables the other two.
+                  // Selector is shared by attribute + style_property; only
+                  // url_regex bypasses it.
+                  const regexDisabled = hasAttr || hasStyle
+                  const attrDisabled = hasRegex || hasStyle
+                  const styleDisabled = hasRegex || hasAttr
                   return (
                     <div key={path} className="bg-base-200/50 rounded-lg p-3 space-y-1.5">
                       <div className="flex items-center gap-2">
@@ -626,17 +647,21 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
                           value={mapping?.selector ?? ''}
                           onChange={(e) => updateMapping(path, { selector: e.target.value || null })}
                           onBlur={(e) => e.target.value && highlightSelector(e.target.value)}
-                          disabled={!!mapping?.url_regex}
-                          title={mapping?.url_regex ? 'Disabled — URL regex takes priority' : ''}
+                          disabled={hasRegex}
+                          title={hasRegex ? 'Disabled — URL regex takes priority' : ''}
                         />
                         <input
                           type="text"
                           className="input input-bordered input-xs w-20 font-mono text-xs"
                           placeholder="attr"
-                          title="Attribute (optional, e.g. href, src)"
+                          title={
+                            hasRegex ? 'Disabled — URL regex takes priority'
+                            : hasStyle ? 'Disabled — style property takes priority'
+                            : 'Attribute (optional, e.g. href, src)'
+                          }
                           value={mapping?.attribute ?? ''}
                           onChange={(e) => updateMapping(path, { attribute: e.target.value || null })}
-                          disabled={!!mapping?.url_regex}
+                          disabled={attrDisabled}
                         />
                         {selectedPageId && (
                           <button
@@ -647,15 +672,51 @@ export default function ContentMapperStep({ onContinue }: ContentMapperStepProps
                             <span className="icon-[tabler--pointer] size-3" />
                           </button>
                         )}
+                        <button
+                          className={`btn btn-xs btn-square ${showRegex ? 'btn-primary' : 'btn-ghost'}`}
+                          onClick={() => toggleExpand(expandedRegex, setExpandedRegex, path)}
+                          title="URL regex source"
+                        >
+                          <span className="icon-[tabler--regex] size-3" />
+                        </button>
+                        <button
+                          className={`btn btn-xs btn-square ${showStyle ? 'btn-primary' : 'btn-ghost'}`}
+                          onClick={() => toggleExpand(expandedStyle, setExpandedStyle, path)}
+                          title="CSS style property source"
+                        >
+                          <span className="icon-[tabler--brand-css3] size-3" />
+                        </button>
                       </div>
-                      <input
-                        type="text"
-                        className="input input-bordered input-xs w-full font-mono text-[10px] mt-1"
-                        placeholder={`URL regex (optional, capture group 1 → value, e.g. /id/(\\d+))`}
-                        value={mapping?.url_regex ?? ''}
-                        onChange={(e) => updateMapping(path, { url_regex: e.target.value || null })}
-                        title="If set, the field value comes from this regex match against the page URL — overrides the selector."
-                      />
+                      {showRegex && (
+                        <input
+                          type="text"
+                          className="input input-bordered input-xs w-full font-mono text-[10px] mt-1"
+                          placeholder={`URL regex (capture group 1 → value, e.g. /id/(\\d+))`}
+                          value={mapping?.url_regex ?? ''}
+                          onChange={(e) => updateMapping(path, { url_regex: e.target.value || null })}
+                          disabled={regexDisabled}
+                          title={
+                            hasAttr ? 'Disabled — attribute source is set; clear it first'
+                            : hasStyle ? 'Disabled — style property source is set; clear it first'
+                            : 'If set, the field value comes from this regex match against the page URL — overrides the selector.'
+                          }
+                        />
+                      )}
+                      {showStyle && (
+                        <input
+                          type="text"
+                          className="input input-bordered input-xs w-full font-mono text-[10px] mt-1"
+                          placeholder="CSS property (e.g. background-image)"
+                          value={mapping?.style_property ?? ''}
+                          onChange={(e) => updateMapping(path, { style_property: e.target.value || null })}
+                          disabled={styleDisabled}
+                          title={
+                            hasRegex ? 'Disabled — URL regex source is set; clear it first'
+                            : hasAttr ? 'Disabled — attribute source is set; clear it first'
+                            : 'Resolves the named CSS property for the selector (element style attr → <style> blocks → external stylesheets, first match wins).'
+                          }
+                        />
+                      )}
                     </div>
                   )
                 })}

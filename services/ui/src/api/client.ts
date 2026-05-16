@@ -186,6 +186,7 @@ export interface FieldMapping {
   selector?: string | null
   attribute?: string | null
   url_regex?: string | null
+  style_property?: string | null
 }
 
 export type IteratorName = 'i' | 'j' | 'k'

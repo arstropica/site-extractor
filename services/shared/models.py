@@ -196,14 +196,24 @@ class ExtractionSchema(BaseModel):
 class FieldMapping(BaseModel):
     """Maps a schema field to a value source within the current boundary scope.
 
-    Sources are tried in priority order: url_regex > selector. If url_regex
-    is set, the field value comes from a regex capture against the page URL
-    rather than from the DOM. Useful for IDs embedded in URL paths.
+    Three mutually-exclusive value sources, enforced by the UI (each input
+    disables the others when it has content):
+      - url_regex: value = capture group 1 of regex against the page URL.
+        Used for IDs embedded in URL paths; ignores selector + attribute.
+      - style_property: value = the named CSS property's value, looked up
+        across element style attr, inline <style> blocks, and external
+        stylesheets (first match wins). Uses selector to pick the element.
+      - attribute: value = the named HTML attribute on the element.
+      - (default): value = the element's text content.
+
+    Resolution priority when more than one is present (stale data, manual
+    edits): url_regex > style_property > attribute > text.
     """
     field_path: str              # dot-notation, e.g. "title" or "movie.title"
     selector: Optional[str] = None  # CSS selector; None = use boundary element itself
     attribute: Optional[str] = None  # e.g. "href", "src", "data-id"; None = textContent
     url_regex: Optional[str] = None  # if set, value = capture group 1 of regex against page URL
+    style_property: Optional[str] = None  # if set, value = effective CSS property for selector
 
 
 IteratorName = Literal["i", "j", "k"]
