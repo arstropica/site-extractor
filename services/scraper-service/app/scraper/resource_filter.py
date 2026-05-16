@@ -5,6 +5,31 @@ from urllib.parse import urlparse
 from typing import Optional
 
 
+# Asset classes required for preview/extraction fidelity. These bypass the
+# user's category filters because the rest of the pipeline depends on them:
+# the iframe preview needs CSS to render correctly, and the selector-style
+# extractor needs CSS rules on disk to resolve computed values. CSS is
+# categorized as "code" in resource records (matching its MIME_TO_CATEGORY
+# entry) so the existing category model isn't widened just for this.
+_FIDELITY_MIMES = {"text/css"}
+_FIDELITY_EXTENSIONS = {"css"}
+_FIDELITY_CATEGORY = "code"
+
+
+def _is_fidelity_asset(url: str, mime_type: Optional[str] = None) -> bool:
+    if mime_type:
+        clean = mime_type.split(";")[0].strip().lower()
+        if clean in _FIDELITY_MIMES:
+            return True
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    if "." in path:
+        ext = path.rsplit(".", 1)[-1].lower()
+        if ext in _FIDELITY_EXTENSIONS:
+            return True
+    return False
+
+
 MIME_TO_CATEGORY = {
     "text/html": "web_pages",
     "application/xhtml+xml": "web_pages",
@@ -94,6 +119,11 @@ class ResourceFilter:
         is actually being served — extensions can be missing, lying, or hidden
         in the query string (image CDNs, Wayback combiner URLs, etc.).
         """
+        # 0. Fidelity bypass — stylesheets are required for the preview iframe
+        # and the selector-style extractor regardless of user category settings.
+        if _is_fidelity_asset(url, mime_type):
+            return _FIDELITY_CATEGORY
+
         parsed = urlparse(url)
         path = parsed.path.rstrip("/")
         ext = path.rsplit(".", 1)[-1].lower() if "." in path else None
@@ -136,6 +166,10 @@ class ResourceFilter:
         server's reported MIME. The downstream HEAD path calls
         get_category(url, mime_type) which is the authoritative gate.
         """
+        # Fidelity assets pass the prefilter regardless of enabled categories
+        # or extension excludes — they're required downstream.
+        if _is_fidelity_asset(url):
+            return True
         if not self.enabled_categories:
             return False
         parsed = urlparse(url)
